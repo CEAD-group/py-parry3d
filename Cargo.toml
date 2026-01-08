@@ -1,0 +1,17 @@
+[package]
+name = "py-parry3d"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+name = "py_parry3d"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.27.2", features = ["extension-module"] }
+numpy = "0.27"
+parry3d-f64 = { version = "0.25.3", features = ["serde-serialize"] }
+rayon = "1.10"
+nalgebra = "0.34"
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"

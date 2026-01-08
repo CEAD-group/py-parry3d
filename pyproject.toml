@@ -1,0 +1,37 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "py-parry3d"
+dynamic = ["version"]
+requires-python = ">=3.11"
+description = "Python bindings for parry3d collision detection, optimized for batch operations"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+dependencies = [
+    "numpy>=1.26.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "maturin>=1.7.4",
+]
+test = [
+    "pytest",
+    "scipy>=1.14",
+    "trimesh",
+]
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "py_parry3d._internal"
+include = ["python/py_parry3d/py.typed"]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.407",
+]
