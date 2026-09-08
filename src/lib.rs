@@ -1,4 +1,4 @@
-use nalgebra::{Isometry3, Matrix4, Point3, Translation3, UnitQuaternion, Vector3};
+use parry3d_f64::math::{Mat3, Pose3, Rot3, Vec3};
 use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray2, PyReadonlyArray3, PyUntypedArrayMethods, IntoPyArray};
 use parry3d_f64::shape::{
     Ball, Capsule as ParryCapsule, Compound, ConvexPolyhedron, Cuboid,
@@ -38,7 +38,7 @@ impl Box {
 
 impl Box {
     fn to_shared_shape(&self) -> SharedShape {
-        SharedShape::new(Cuboid::new(Vector3::new(
+        SharedShape::new(Cuboid::new(Vec3::new(
             self.half_extents[0],
             self.half_extents[1],
             self.half_extents[2],
@@ -124,8 +124,8 @@ impl Cylinder {
     fn to_shared_shape(&self) -> SharedShape {
         // parry3d Cylinder is along Y axis, rotate to Z axis
         // Rotate 90 degrees around X axis: Y -> Z
-        let rotation = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), std::f64::consts::FRAC_PI_2);
-        let iso = Isometry3::from_parts(Translation3::identity(), rotation);
+        let rotation = Rot3::from_axis_angle(Vec3::X, std::f64::consts::FRAC_PI_2);
+        let iso = Pose3::from_rotation(rotation);
         let cylinder = ParryCylinder::new(self.half_height, self.radius);
         SharedShape::new(Compound::new(vec![(iso, SharedShape::new(cylinder))]))
     }
@@ -193,9 +193,9 @@ impl TriMesh {
 
 impl TriMesh {
     fn to_shared_shape(&self) -> SharedShape {
-        let points: Vec<Point3<f64>> = self.vertices
+        let points: Vec<Vec3> = self.vertices
             .iter()
-            .map(|v| Point3::new(v[0], v[1], v[2]))
+            .map(|v| Vec3::new(v[0], v[1], v[2]))
             .collect();
 
         let trimesh = ParryTriMesh::new(points, self.faces.clone())
@@ -238,11 +238,11 @@ impl ConvexHull {
             return Err(PyValueError::new_err("vertices must be (N, 3) array"));
         }
 
-        // Convert input vertices to Point3
-        let points: Vec<Point3<f64>> = vertices
+        // Convert input vertices to parry's vector type
+        let points: Vec<Vec3> = vertices
             .as_slice()?
             .chunks(3)
-            .map(|c| Point3::new(c[0], c[1], c[2]))
+            .map(|c| Vec3::new(c[0], c[1], c[2]))
             .collect();
 
         // Compute convex hull using parry3d
@@ -310,9 +310,9 @@ impl ConvexHull {
 
 impl ConvexHull {
     fn to_shared_shape(&self) -> SharedShape {
-        let points: Vec<Point3<f64>> = self.hull_vertices
+        let points: Vec<Vec3> = self.hull_vertices
             .iter()
-            .map(|v| Point3::new(v[0], v[1], v[2]))
+            .map(|v| Vec3::new(v[0], v[1], v[2]))
             .collect();
 
         // Recreate the convex polyhedron from stored hull vertices
@@ -377,16 +377,15 @@ fn extract_shape(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<ShapeData>
 // Transform helpers
 // ============================================================================
 
-fn matrix4_to_isometry(m: &[[f64; 4]; 4]) -> Isometry3<f64> {
-    let rotation = nalgebra::Rotation3::from_matrix_unchecked(Matrix4::new(
-        m[0][0], m[0][1], m[0][2], m[0][3],
-        m[1][0], m[1][1], m[1][2], m[1][3],
-        m[2][0], m[2][1], m[2][2], m[2][3],
-        m[3][0], m[3][1], m[3][2], m[3][3],
-    ).fixed_view::<3, 3>(0, 0).into());
-
-    let translation = Translation3::new(m[0][3], m[1][3], m[2][3]);
-    Isometry3::from_parts(translation, UnitQuaternion::from_rotation_matrix(&rotation))
+fn matrix4_to_isometry(m: &[[f64; 4]; 4]) -> Pose3 {
+    // `m` is a row-major 4x4 homogeneous matrix; `Mat3::from_cols` takes columns.
+    let rotation = Mat3::from_cols(
+        Vec3::new(m[0][0], m[1][0], m[2][0]),
+        Vec3::new(m[0][1], m[1][1], m[2][1]),
+        Vec3::new(m[0][2], m[1][2], m[2][2]),
+    );
+    let translation = Vec3::new(m[0][3], m[1][3], m[2][3]);
+    Pose3::from_parts(translation, Rot3::from_mat3(&rotation))
 }
 
 fn extract_transform_4x4(arr: &PyReadonlyArray2<f64>) -> PyResult<[[f64; 4]; 4]> {
@@ -445,7 +444,7 @@ impl CollisionObject {
 }
 
 impl CollisionObject {
-    fn to_isometry(&self) -> Isometry3<f64> {
+    fn to_isometry(&self) -> Pose3 {
         matrix4_to_isometry(&self.transform)
     }
 }
@@ -465,7 +464,7 @@ pub struct CollisionGroup {
     is_static: bool,
     static_transform: Option<[[f64; 4]; 4]>,
     #[serde(skip)]
-    cached_shape: Option<Arc<(SharedShape, Isometry3<f64>)>>,
+    cached_shape: Option<Arc<(SharedShape, Pose3)>>,
 }
 
 #[pymethods]
@@ -535,17 +534,17 @@ impl CollisionGroup {
 }
 
 impl CollisionGroup {
-    /// The group's collision shape plus the isometry to compose onto the group
+    /// The group's collision shape plus the pose to compose onto the group
     /// pose before querying it.
     ///
     /// A multi-object group is a parry `Compound`, which carries every object's
-    /// local isometry itself, so the companion isometry is the identity. A lone
+    /// local pose itself, so the companion pose is the identity. A lone
     /// object is kept as its bare shape — parry's query dispatch does not
     /// support a `TriMesh` or `ConvexPolyhedron` inside a `Compound` — and its
-    /// local isometry is returned alongside so the query can apply it. Dropping
+    /// local pose is returned alongside so the query can apply it. Dropping
     /// it, as the shortcut used to, tested the shape centred on the group frame
     /// (#1).
-    fn build_shape(&mut self) -> Arc<(SharedShape, Isometry3<f64>)> {
+    fn build_shape(&mut self) -> Arc<(SharedShape, Pose3)> {
         if let Some(ref cached) = self.cached_shape {
             return cached.clone();
         }
@@ -553,17 +552,17 @@ impl CollisionGroup {
         let result = if self.objects.len() == 1 {
             Arc::new((self.objects[0].shape.to_shared_shape(), self.objects[0].to_isometry()))
         } else {
-            let shapes: Vec<(Isometry3<f64>, SharedShape)> = self.objects
+            let shapes: Vec<(Pose3, SharedShape)> = self.objects
                 .iter()
                 .map(|o| (o.to_isometry(), o.shape.to_shared_shape()))
                 .collect();
-            Arc::new((SharedShape::new(Compound::new(shapes)), Isometry3::identity()))
+            Arc::new((SharedShape::new(Compound::new(shapes)), Pose3::IDENTITY))
         };
         self.cached_shape = Some(result.clone());
         result
     }
 
-    fn get_static_isometry(&self) -> Option<Isometry3<f64>> {
+    fn get_static_isometry(&self) -> Option<Pose3> {
         self.static_transform.as_ref().map(|t| matrix4_to_isometry(t))
     }
 }
@@ -585,7 +584,7 @@ struct CollisionWorldData {
 pub struct CollisionWorld {
     data: CollisionWorldData,
     // Cached shapes (not serialized, rebuilt on load)
-    shapes: Vec<Arc<(SharedShape, Isometry3<f64>)>>,
+    shapes: Vec<Arc<(SharedShape, Pose3)>>,
 }
 
 #[pymethods]
@@ -777,8 +776,8 @@ impl CollisionWorld {
         struct GroupCheckData {
             shape: SharedShape,
             is_static: bool,
-            static_isometry: Option<Isometry3<f64>>,
-            local_offset: Isometry3<f64>,
+            static_isometry: Option<Pose3>,
+            local_offset: Pose3,
         }
 
         let group_data: Vec<GroupCheckData> = self.data.groups
@@ -797,7 +796,7 @@ impl CollisionWorld {
             .into_par_iter()
             .map(|pose_idx| {
                 // Build isometries for this pose
-                let mut isometries: Vec<Option<Isometry3<f64>>> = vec![None; self.data.groups.len()];
+                let mut isometries: Vec<Option<Pose3>> = vec![None; self.data.groups.len()];
 
                 for (name, tfs) in &transform_arrays {
                     let group_idx = self.data.group_indices[name];
@@ -972,8 +971,8 @@ impl CollisionWorld {
         struct GroupCheckData {
             shape: SharedShape,
             is_static: bool,
-            static_isometry: Option<Isometry3<f64>>,
-            local_offset: Isometry3<f64>,
+            static_isometry: Option<Pose3>,
+            local_offset: Pose3,
         }
 
         let group_data: Vec<GroupCheckData> = self.data.groups
@@ -992,7 +991,7 @@ impl CollisionWorld {
             .into_par_iter()
             .find_any(|&pose_idx| {
                 // Build isometries for this pose
-                let mut isometries: Vec<Option<Isometry3<f64>>> = vec![None; self.data.groups.len()];
+                let mut isometries: Vec<Option<Pose3>> = vec![None; self.data.groups.len()];
 
                 for (name, tfs) in &transform_arrays {
                     let group_idx = self.data.group_indices[name];
