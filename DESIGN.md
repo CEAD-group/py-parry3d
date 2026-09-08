@@ -142,7 +142,7 @@ Supports both `to_bytes()`/`from_bytes()` and pickle protocol.
 - numpy (array interface)
 - parry3d (collision detection)
 - rayon (parallelism)
-- nalgebra (linear algebra)
+- glam (linear algebra, via parry3d's `glamx`)
 - serde + bincode (serialization)
 
 ### Key Optimizations
