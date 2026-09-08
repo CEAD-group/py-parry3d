@@ -819,16 +819,7 @@ impl CollisionWorld {
         pairs: &Bound<'py, PyList>,
     ) -> PyResult<Py<PyAny>> {
         // Parse pairs (3-tuples with min_distance)
-        let pair_vec: Vec<(String, String, f64)> = pairs
-            .iter()
-            .map(|item| {
-                let tuple = item.cast::<pyo3::types::PyTuple>()?;
-                let a: String = tuple.get_item(0)?.extract()?;
-                let b: String = tuple.get_item(1)?.extract()?;
-                let min_dist: f64 = tuple.get_item(2)?.extract()?;
-                Ok((a, b, min_dist))
-            })
-            .collect::<PyResult<Vec<_>>>()?;
+        let pair_vec = parse_pairs(pairs)?;
 
         // Validate pair group names
         for (a, b, _) in &pair_vec {
@@ -1021,16 +1012,7 @@ impl CollisionWorld {
         pairs: &Bound<'py, PyList>,
     ) -> PyResult<Option<usize>> {
         // Parse pairs (3-tuples with min_distance)
-        let pair_vec: Vec<(String, String, f64)> = pairs
-            .iter()
-            .map(|item| {
-                let tuple = item.cast::<pyo3::types::PyTuple>()?;
-                let a: String = tuple.get_item(0)?.extract()?;
-                let b: String = tuple.get_item(1)?.extract()?;
-                let min_dist: f64 = tuple.get_item(2)?.extract()?;
-                Ok((a, b, min_dist))
-            })
-            .collect::<PyResult<Vec<_>>>()?;
+        let pair_vec = parse_pairs(pairs)?;
 
         // Validate pair group names
         for (a, b, _) in &pair_vec {
@@ -1247,6 +1229,67 @@ impl CollisionWorld {
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+/// Parse a list of `(group_a, group_b, min_distance)` 3-tuples.
+///
+/// Validates that every element is a tuple of exactly three items with the
+/// right element types, so a malformed `pairs` argument names the offending
+/// index instead of raising an opaque `IndexError` (too few items) or being
+/// silently truncated (too many items).
+fn parse_pairs(pairs: &Bound<'_, PyList>) -> PyResult<Vec<(String, String, f64)>> {
+    pairs
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let tuple = item.cast::<pyo3::types::PyTuple>().map_err(|_| {
+                PyValueError::new_err(format!(
+                    "pairs[{}]: expected a (group_a, group_b, min_distance) 3-tuple, got '{}'",
+                    i,
+                    type_name_of(&item)
+                ))
+            })?;
+            if tuple.len() != 3 {
+                return Err(PyValueError::new_err(format!(
+                    "pairs[{}]: expected a (group_a, group_b, min_distance) 3-tuple, got {} elements",
+                    i,
+                    tuple.len()
+                )));
+            }
+            let a_obj = tuple.get_item(0)?;
+            let a: String = a_obj.extract().map_err(|_| {
+                PyTypeError::new_err(format!(
+                    "pairs[{}]: group_a must be a str, got '{}'",
+                    i,
+                    type_name_of(&a_obj)
+                ))
+            })?;
+            let b_obj = tuple.get_item(1)?;
+            let b: String = b_obj.extract().map_err(|_| {
+                PyTypeError::new_err(format!(
+                    "pairs[{}]: group_b must be a str, got '{}'",
+                    i,
+                    type_name_of(&b_obj)
+                ))
+            })?;
+            let d_obj = tuple.get_item(2)?;
+            let min_dist: f64 = d_obj.extract().map_err(|_| {
+                PyTypeError::new_err(format!(
+                    "pairs[{}]: min_distance must be a float, got '{}'",
+                    i,
+                    type_name_of(&d_obj)
+                ))
+            })?;
+            Ok((a, b, min_dist))
+        })
+        .collect()
+}
+
+/// Best-effort type name for use in error messages.
+fn type_name_of(obj: &Bound<'_, PyAny>) -> String {
+    obj.get_type()
+        .name()
+        .map_or_else(|_| "unknown".to_string(), |n| n.to_string())
+}
 
 /// Generate all pairs between groups, optionally skipping adjacent indices.
 #[pyfunction]
