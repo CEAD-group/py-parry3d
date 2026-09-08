@@ -370,3 +370,58 @@ class TestSingleObjectLocalTransform:
         world = pickle.loads(pickle.dumps(world))
         transforms = {"a": np.eye(4, dtype=np.float64).reshape(1, 4, 4)}
         assert not world.check(transforms, [("a", "b", 0.0)])[0]
+
+
+
+class TestCompoundVsCylinder:
+    """Regression guard for a false negative fixed in parry3d-f64 0.30.1.
+
+    A lone ``Cylinder`` group (parry represents a Cylinder as a one-element
+    ``Compound``) checked against a multi-shape group produced a contiguous
+    band of *missed* collisions in the middle of an otherwise colliding range:
+    on parry 0.26.x-0.30.0 separations 0.505-0.555 reported "clear" while both
+    smaller and larger separations up to 0.7 reported "colliding".
+    """
+
+    @staticmethod
+    def _tf(x=0.0, y=0.0, z=0.0):
+        m = np.eye(4)
+        m[:3, 3] = [x, y, z]
+        return m
+
+    def test_no_false_negative_band(self):
+        cyl = pp.CollisionGroup("cyl", [pp.Cylinder(0.5, 0.3)])
+        multi = pp.CollisionGroup(
+            "multi",
+            [
+                pp.CollisionObject(pp.Box([0.2, 0.2, 0.2]), self._tf(0.5)),
+                pp.CollisionObject(pp.Sphere(0.2), self._tf(-0.5)),
+            ],
+        )
+        world = pp.CollisionWorld([cyl, multi])
+
+        # Contact along z is at 0.5 (cylinder half-height) + 0.2 (box
+        # half-extent) = 0.7, so every sample below that must collide.
+        seps = np.arange(0.0, 0.70, 0.005)
+        hits = np.array(
+            [
+                bool(
+                    np.asarray(
+                        world.check(
+                            {"cyl": self._tf(), "multi": self._tf(0.0, 0.0, float(d))},
+                            [("cyl", "multi", 0.0)],
+                        )
+                    ).ravel()[0]
+                )
+                for d in seps
+            ]
+        )
+        missed = seps[~hits]
+        assert missed.size == 0, f"missed collisions at separations {missed}"
+
+        # ...and clear once past the contact distance.
+        clear = world.check(
+            {"cyl": self._tf(), "multi": self._tf(0.0, 0.0, 0.71)},
+            [("cyl", "multi", 0.0)],
+        )
+        assert not bool(np.asarray(clear).ravel()[0])
