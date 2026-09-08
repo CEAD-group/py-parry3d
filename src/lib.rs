@@ -377,8 +377,48 @@ fn extract_shape(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<ShapeData>
 // Transform helpers
 // ============================================================================
 
+/// Converts a 4x4 homogeneous transform to a parry `Pose3`.
+///
+/// # Contract
+///
+/// `m` is indexed `m[row][col]` — **row-major**, matching the NumPy `(4, 4)`
+/// arrays callers hand in. It must be a *rigid* transform:
+///
+/// - the upper-left 3x3 block is a proper rotation: orthonormal columns,
+///   determinant +1, no scale, no shear, no reflection;
+/// - the last row is `[0, 0, 0, 1]`;
+/// - every element is finite (no `NaN`, no infinity).
+///
+/// Only the 3x3 rotation block and the `m[0..3][3]` translation column are
+/// read. **The last row is ignored entirely** — it is neither used nor
+/// checked, so a caller that puts a perspective term or garbage there gets no
+/// diagnostic.
+///
+/// # Violating the contract is silent
+///
+/// Nothing here validates any of the above, and neither does
+/// `extract_transform_4x4`, which only checks the array's `(4, 4)` shape. A
+/// non-rigid matrix produces a garbage pose rather than an error:
+///
+/// - **scale and shear are silently dropped.** `Rot3::from_mat3` is documented
+///   as ill-defined for a non-rotation 3x3 block; it only panics when glam's
+///   `glam_assert` feature is on, which it is not in this build. A transform
+///   scaled 2x moves the shape but leaves it its original size.
+/// - **non-finite input propagates** into the pose instead of being rejected,
+///   and the resulting query answers are meaningless.
+///
+/// This predates the nalgebra to glam migration — the previous implementation
+/// used `nalgebra::Rotation3::from_matrix_unchecked`, equally unchecked.
+/// Adding validation is tracked in #12; it is deliberately not done here
+/// because rejecting input this has always accepted would be a behaviour
+/// change, and does not belong in a dependency migration.
+///
+/// # Note on layout
+///
+/// glam is **column-major** and `Mat3::from_cols` takes columns, so the 3x3
+/// block is transposed on the way in: column `j` is built from `m[0][j]`,
+/// `m[1][j]`, `m[2][j]`. Getting this backwards inverts every rotation.
 fn matrix4_to_isometry(m: &[[f64; 4]; 4]) -> Pose3 {
-    // `m` is a row-major 4x4 homogeneous matrix; `Mat3::from_cols` takes columns.
     let rotation = Mat3::from_cols(
         Vec3::new(m[0][0], m[1][0], m[2][0]),
         Vec3::new(m[0][1], m[1][1], m[2][1]),
