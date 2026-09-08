@@ -376,11 +376,22 @@ class TestSingleObjectLocalTransform:
 class TestCompoundVsCylinder:
     """Regression guard for a false negative fixed in parry3d-f64 0.30.1.
 
-    A lone ``Cylinder`` group (parry represents a Cylinder as a one-element
-    ``Compound``) checked against a multi-shape group produced a contiguous
-    band of *missed* collisions in the middle of an otherwise colliding range:
-    on parry 0.26.x-0.30.0 separations 0.505-0.555 reported "clear" while both
-    smaller and larger separations up to 0.7 reported "colliding".
+    A lone ``Cylinder`` group checked against a multi-shape group produced a
+    contiguous band of *missed* collisions in the middle of an otherwise
+    colliding range: on parry 0.26.x-0.30.0 separations 0.505-0.555 reported
+    "clear" while both smaller and larger separations up to 0.7 reported
+    "colliding".
+
+    Note on the code path: when this guard was written, a lone ``Cylinder``
+    group *was* a one-element ``Compound`` (that is how the Y->Z
+    reorientation used to be expressed), so
+    ``test_no_false_negative_band`` exercised parry's compound-vs-compound
+    dispatch. Since #9 a cylinder is a bare ``parry`` ``Cylinder`` with a
+    pose offset, so that test now exercises cylinder-vs-compound instead.
+    It is kept — it is still a dense correctness sweep over exactly the
+    geometry #9 touched — and
+    ``test_no_false_negative_band_compound_vs_compound`` was added to keep
+    covering the original compound-vs-compound path.
     """
 
     @staticmethod
@@ -425,3 +436,186 @@ class TestCompoundVsCylinder:
             [("cyl", "multi", 0.0)],
         )
         assert not bool(np.asarray(clear).ravel()[0])
+
+    def test_no_false_negative_band_compound_vs_compound(self):
+        """Same sweep, with the cylinder itself inside a ``Compound``.
+
+        Keeps covering parry's compound-vs-compound dispatch, which the
+        cylinder group stopped exercising once the one-element ``Compound``
+        wrapper was removed (#9). The padding sphere sits far away so the
+        expected contact distances are unchanged.
+        """
+        cyl = pp.CollisionGroup(
+            "cyl",
+            [
+                pp.CollisionObject(pp.Cylinder(0.5, 0.3), np.eye(4)),
+                pp.CollisionObject(pp.Sphere(0.1), self._tf(0.0, 100.0, 0.0)),
+            ],
+        )
+        multi = pp.CollisionGroup(
+            "multi",
+            [
+                pp.CollisionObject(pp.Box([0.2, 0.2, 0.2]), self._tf(0.5)),
+                pp.CollisionObject(pp.Sphere(0.2), self._tf(-0.5)),
+            ],
+        )
+        world = pp.CollisionWorld([cyl, multi])
+
+        seps = np.arange(0.0, 0.70, 0.005)
+        hits = np.array(
+            [
+                bool(
+                    np.asarray(
+                        world.check(
+                            {"cyl": self._tf(), "multi": self._tf(0.0, 0.0, float(d))},
+                            [("cyl", "multi", 0.0)],
+                        )
+                    ).ravel()[0]
+                )
+                for d in seps
+            ]
+        )
+        missed = seps[~hits]
+        assert missed.size == 0, f"missed collisions at separations {missed}"
+
+        clear = world.check(
+            {"cyl": self._tf(), "multi": self._tf(0.0, 0.0, 0.71)},
+            [("cyl", "multi", 0.0)],
+        )
+        assert not bool(np.asarray(clear).ravel()[0])
+
+
+class TestCylinderInMultiObjectGroup:
+    """Regression guard for #9: a Cylinder in a multi-object group panicked.
+
+    ``Cylinder`` used to be built as a one-element parry ``Compound`` to
+    reorient it from parry's Y axis to Z. A multi-object ``CollisionGroup``
+    is itself a ``Compound``, so the group build nested one inside the other
+    and parry panicked with "Nested composite shapes are not allowed".
+    """
+
+    @staticmethod
+    def _tf(x=0.0, y=0.0, z=0.0):
+        m = np.eye(4)
+        m[:3, 3] = [x, y, z]
+        return m
+
+    def test_issue_9_repro(self):
+        """The exact reproducer from issue #9 must not panic."""
+        group = pp.CollisionGroup("multi", [pp.Cylinder(0.5, 0.1), pp.Sphere(0.1)])
+        world = pp.CollisionWorld([group, pp.CollisionGroup("other", [pp.Sphere(0.1)])])
+        result = world.check(
+            {"multi": self._tf(), "other": self._tf(10.0)},
+            [("multi", "other", 0.0)],
+        )
+        assert not bool(np.asarray(result).ravel()[0])
+
+    def test_cylinder_in_group_stays_z_aligned(self):
+        """A cylinder inside a Compound must keep its Z-axis orientation.
+
+        The cylinder is long in Z (half-height 0.5) and thin in X/Y
+        (radius 0.1). A probe sphere of radius 0.1 therefore touches it out
+        to 0.6 along Z but only to 0.2 along X or Y. A botched rotation
+        composition would leave it Y-aligned, swapping those answers.
+        """
+        # Second object placed far away so it cannot influence the results.
+        multi = pp.CollisionGroup(
+            "multi",
+            [
+                pp.CollisionObject(pp.Cylinder(0.5, 0.1), np.eye(4)),
+                pp.CollisionObject(pp.Sphere(0.1), self._tf(100.0)),
+            ],
+        )
+        probe = pp.CollisionGroup("probe", [pp.Sphere(0.1)])
+        world = pp.CollisionWorld([multi, probe])
+
+        def hit(x=0.0, y=0.0, z=0.0):
+            return bool(
+                np.asarray(
+                    world.check(
+                        {"multi": self._tf(), "probe": self._tf(x, y, z)},
+                        [("multi", "probe", 0.0)],
+                    )
+                ).ravel()[0]
+            )
+
+        # Long axis is Z: reaches to 0.6, not beyond.
+        assert hit(z=0.55)
+        assert not hit(z=0.65)
+        # Short axes are X and Y: reach only to 0.2.
+        assert hit(x=0.15)
+        assert not hit(x=0.25)
+        assert hit(y=0.15)
+        assert not hit(y=0.25)
+
+    def test_lone_cylinder_group_stays_z_aligned(self):
+        """The lone-object shortcut must keep the same orientation."""
+        cyl = pp.CollisionGroup("cyl", [pp.Cylinder(0.5, 0.1)])
+        probe = pp.CollisionGroup("probe", [pp.Sphere(0.1)])
+        world = pp.CollisionWorld([cyl, probe])
+
+        def hit(x=0.0, z=0.0):
+            return bool(
+                np.asarray(
+                    world.check(
+                        {"cyl": self._tf(), "probe": self._tf(x, 0.0, z)},
+                        [("cyl", "probe", 0.0)],
+                    )
+                ).ravel()[0]
+            )
+
+        assert hit(z=0.55)
+        assert not hit(z=0.65)
+        assert hit(x=0.15)
+        assert not hit(x=0.25)
+
+    def test_cylinder_local_offset_in_group(self):
+        """A cylinder's own transform inside a group must still apply."""
+        multi = pp.CollisionGroup(
+            "multi",
+            [
+                pp.CollisionObject(pp.Cylinder(0.5, 0.1), self._tf(0.0, 0.0, 2.0)),
+                pp.CollisionObject(pp.Sphere(0.1), self._tf(100.0)),
+            ],
+        )
+        probe = pp.CollisionGroup("probe", [pp.Sphere(0.1)])
+        world = pp.CollisionWorld([multi, probe])
+
+        def hit(z):
+            return bool(
+                np.asarray(
+                    world.check(
+                        {"multi": self._tf(), "probe": self._tf(0.0, 0.0, z)},
+                        [("multi", "probe", 0.0)],
+                    )
+                ).ravel()[0]
+            )
+
+        # Cylinder now spans z in [1.5, 2.5]; probe reaches 0.1 beyond.
+        assert not hit(0.0)
+        assert hit(2.0)
+        assert hit(2.55)
+        assert not hit(2.65)
+
+    def test_cylinder_local_offset_lone_group(self):
+        """Same, through the lone-object shortcut (guards #1 for cylinders)."""
+        cyl = pp.CollisionGroup(
+            "cyl", [pp.CollisionObject(pp.Cylinder(0.5, 0.1), self._tf(0.0, 0.0, 2.0))]
+        )
+        probe = pp.CollisionGroup("probe", [pp.Sphere(0.1)])
+        world = pp.CollisionWorld([cyl, probe])
+
+        def hit(z):
+            return bool(
+                np.asarray(
+                    world.check(
+                        {"cyl": self._tf(), "probe": self._tf(0.0, 0.0, z)},
+                        [("cyl", "probe", 0.0)],
+                    )
+                ).ravel()[0]
+            )
+
+        assert not hit(0.0)
+        assert hit(2.0)
+        assert hit(2.55)
+        assert not hit(2.65)
