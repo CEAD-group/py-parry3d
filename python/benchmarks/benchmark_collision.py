@@ -1,11 +1,10 @@
 """Benchmarks for py-parry3d collision detection."""
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
-
 import py_parry3d as pp
 
 
@@ -146,7 +145,7 @@ def run_batch_size_benchmark(world: pp.CollisionWorld, pairs: list, max_batch: i
     for batch_size in batch_sizes:
         transforms = generate_random_transforms(batch_size, num_dynamic)
 
-        def run():
+        def run(transforms=transforms, pairs=pairs):
             return world.check(transforms, pairs)
 
         elapsed = benchmark(run)
@@ -187,7 +186,7 @@ def run_pair_count_benchmark(world: pp.CollisionWorld, batch_size: int = 10_000)
         if not pairs:
             continue
 
-        def run():
+        def run(transforms=transforms, pairs=pairs):
             return world.check(transforms, pairs)
 
         elapsed = benchmark(run)
@@ -266,7 +265,7 @@ def main():
     for batch_size in [1, 100, 1_000, 10_000, 50_000]:
         transforms = generate_mesh_transforms(batch_size)
 
-        def run():
+        def run(transforms=transforms):
             return mesh_world.check(transforms, mesh_pairs)
 
         elapsed = benchmark(run)
@@ -293,10 +292,10 @@ def main():
     max_threads = pp.get_num_threads()
 
     # Note: set_num_threads only works before first parallel op, so this is informational
-    def run():
+    def run_thread_scaling():
         return robot_world.check(transforms, robot_pairs)
 
-    elapsed = benchmark(run)
+    elapsed = benchmark(run_thread_scaling)
     total_checks = 50_000 * len(robot_pairs)
     print(f"  Threads: {max_threads}")
     print(f"  Time: {elapsed * 1000:.2f} ms")

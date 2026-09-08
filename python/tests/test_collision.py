@@ -1,9 +1,8 @@
 """Tests for py_parry3d collision detection."""
 
 import numpy as np
-import pytest
-
 import py_parry3d as pp
+import pytest
 
 
 class TestShapes:

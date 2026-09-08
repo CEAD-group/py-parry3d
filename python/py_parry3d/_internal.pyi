@@ -1,14 +1,16 @@
 """Type stubs for py_parry3d._internal Rust extension."""
 
-from typing import Dict, List, Optional, Sequence, Union
+from collections.abc import Sequence
+from typing import TypeAlias
+
 import numpy as np
 import numpy.typing as npt
 
 # Type aliases
-Transform = npt.NDArray[np.float64]  # (4, 4) array
-BatchTransform = npt.NDArray[np.float64]  # (N, 4, 4) array
-TransformDict = Dict[str, Union[Transform, BatchTransform]]
-PairList = List[tuple[str, str, float]]
+Transform: TypeAlias = npt.NDArray[np.float64]  # (4, 4) array
+BatchTransform: TypeAlias = npt.NDArray[np.float64]  # (N, 4, 4) array
+TransformDict: TypeAlias = dict[str, Transform | BatchTransform]
+PairList: TypeAlias = list[tuple[str, str, float]]
 
 # ============================================================================
 # Shapes
@@ -23,9 +25,7 @@ class Box:
 
         :param half_extents: Half-extents [x, y, z] in meters.
         """
-        ...
 
-    def __repr__(self) -> str: ...
 
 
 class Sphere:
@@ -37,9 +37,7 @@ class Sphere:
 
         :param radius: Radius in meters.
         """
-        ...
 
-    def __repr__(self) -> str: ...
 
 
 class Capsule:
@@ -52,9 +50,7 @@ class Capsule:
         :param half_height: Half-height of the cylindrical part in meters.
         :param radius: Radius in meters.
         """
-        ...
 
-    def __repr__(self) -> str: ...
 
 
 class Cylinder:
@@ -67,9 +63,7 @@ class Cylinder:
         :param half_height: Half-height in meters.
         :param radius: Radius in meters.
         """
-        ...
 
-    def __repr__(self) -> str: ...
 
 
 class TriMesh:
@@ -86,9 +80,7 @@ class TriMesh:
         :param vertices: (N, 3) array of vertex positions.
         :param faces: (M, 3) array of triangle indices.
         """
-        ...
 
-    def __repr__(self) -> str: ...
 
 
 class ConvexHull:
@@ -98,7 +90,7 @@ class ConvexHull:
     def from_mesh(
         vertices: npt.NDArray[np.float64],
         faces: npt.NDArray[np.uint32],
-    ) -> "ConvexHull":
+    ) -> ConvexHull:
         """
         Create a convex hull from mesh vertices and faces.
 
@@ -106,23 +98,19 @@ class ConvexHull:
         :param faces: (M, 3) array of triangle indices.
         :return: A ConvexHull shape.
         """
-        ...
 
     @property
     def vertices(self) -> npt.NDArray[np.float64]:
         """Convex hull vertices (N, 3) float64 array."""
-        ...
 
     @property
     def faces(self) -> npt.NDArray[np.uint32]:
         """Convex hull faces (M, 3) uint32 array."""
-        ...
 
-    def __repr__(self) -> str: ...
 
 
 # Type alias for any shape
-Shape = Union[Box, Sphere, Capsule, Cylinder, TriMesh, ConvexHull]
+Shape: TypeAlias = Box | Sphere | Capsule | Cylinder | TriMesh | ConvexHull
 
 
 # ============================================================================
@@ -135,7 +123,7 @@ class CollisionObject:
     def __init__(
         self,
         shape: Shape,
-        transform: Optional[Transform] = None,
+        transform: Transform | None = None,
     ) -> None:
         """
         Create a collision object.
@@ -143,9 +131,7 @@ class CollisionObject:
         :param shape: The collision shape.
         :param transform: Optional local transform (4x4 matrix). Default: identity.
         """
-        ...
 
-    def __repr__(self) -> str: ...
 
 
 class CollisionGroup:
@@ -157,9 +143,9 @@ class CollisionGroup:
     def __init__(
         self,
         name: str,
-        objects: List[Union[Shape, CollisionObject]],
+        objects: list[Shape | CollisionObject],
         is_static: bool = False,
-        transform: Optional[Transform] = None,
+        transform: Transform | None = None,
     ) -> None:
         """
         Create a collision group.
@@ -169,9 +155,7 @@ class CollisionGroup:
         :param is_static: If True, this group has a fixed transform.
         :param transform: Required for static groups - the fixed world transform.
         """
-        ...
 
-    def __repr__(self) -> str: ...
     def __len__(self) -> int: ...
 
 
@@ -179,22 +163,19 @@ class CollisionWorld:
     """Container for all collision groups."""
 
     @property
-    def dynamic_groups(self) -> List[str]:
+    def dynamic_groups(self) -> list[str]:
         """List of dynamic group names."""
-        ...
 
     @property
-    def static_groups(self) -> List[str]:
+    def static_groups(self) -> list[str]:
         """List of static group names."""
-        ...
 
-    def __init__(self, groups: List[CollisionGroup]) -> None:
+    def __init__(self, groups: list[CollisionGroup]) -> None:
         """
         Create a collision world.
 
         :param groups: List of CollisionGroups (dynamic and static).
         """
-        ...
 
     def __len__(self) -> int: ...
 
@@ -210,13 +191,12 @@ class CollisionWorld:
         :param pairs: List of (group_a, group_b, min_distance) tuples to check.
         :return: Boolean array. Single pose: (n_pairs,). Batch: (N, n_pairs).
         """
-        ...
 
     def check_any(
         self,
         transforms: TransformDict,
         pairs: PairList,
-    ) -> Optional[int]:
+    ) -> int | None:
         """
         Check for any collision, returning early on first hit.
 
@@ -224,16 +204,13 @@ class CollisionWorld:
         :param pairs: List of (group_a, group_b, min_distance) tuples to check.
         :return: Index of first pose with collision, or None if no collisions.
         """
-        ...
 
     def to_bytes(self) -> bytes:
         """Serialize the world to bytes (includes pre-built BVHs)."""
-        ...
 
     @staticmethod
-    def from_bytes(data: bytes) -> "CollisionWorld":
+    def from_bytes(data: bytes) -> CollisionWorld:
         """Deserialize a world from bytes."""
-        ...
 
 
 # ============================================================================
@@ -241,7 +218,7 @@ class CollisionWorld:
 # ============================================================================
 
 def all_pairs(
-    groups: List[str],
+    groups: list[str],
     skip_adjacent: int = 0,
     min_distance: float = 0.0,
 ) -> PairList:
@@ -253,12 +230,11 @@ def all_pairs(
     :param min_distance: Minimum distance threshold for all pairs.
     :return: List of (group_a, group_b, min_distance) tuples.
     """
-    ...
 
 
 def pairs_vs(
-    groups: List[str],
-    other: Union[str, List[str]],
+    groups: list[str],
+    other: str | list[str],
     min_distance: float = 0.0,
 ) -> PairList:
     """
@@ -269,12 +245,11 @@ def pairs_vs(
     :param min_distance: Minimum distance threshold for all pairs.
     :return: List of (group_a, group_b, min_distance) tuples.
     """
-    ...
 
 
 def transform(
-    rotation: Optional[object] = None,
-    translation: Optional[Sequence[float]] = None,
+    rotation: object | None = None,
+    translation: Sequence[float] | None = None,
 ) -> Transform:
     """
     Create a 4x4 transform matrix.
@@ -283,7 +258,6 @@ def transform(
     :param translation: Translation [x, y, z].
     :return: (4, 4) transform matrix.
     """
-    ...
 
 
 def set_num_threads(n: int) -> bool:
@@ -296,9 +270,7 @@ def set_num_threads(n: int) -> bool:
     :param n: Number of threads to use.
     :return: True if successful, False if thread pool was already initialized.
     """
-    ...
 
 
 def get_num_threads() -> int:
     """Get the current number of threads for parallel operations."""
-    ...

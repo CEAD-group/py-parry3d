@@ -14,12 +14,12 @@ When a sphere is completely INSIDE a TriMesh, it does NOT collide
 (because TriMesh only detects surface intersections).
 """
 
-import numpy as np
-import pytest
-import trimesh
 from pathlib import Path
 
+import numpy as np
 import py_parry3d as pp
+import pytest
+import trimesh
 
 TEST_ASSETS = Path(__file__).parent / "test_assets"
 
