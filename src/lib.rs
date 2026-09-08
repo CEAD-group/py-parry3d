@@ -18,7 +18,7 @@ use std::sync::Arc;
 // ============================================================================
 
 /// A box shape with given half-extents.
-#[pyclass(module = "py_parry3d._internal")]
+#[pyclass(module = "py_parry3d._internal", from_py_object)]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Box {
     half_extents: [f64; 3],
@@ -47,7 +47,7 @@ impl Box {
 }
 
 /// A sphere shape with given radius.
-#[pyclass(module = "py_parry3d._internal")]
+#[pyclass(module = "py_parry3d._internal", from_py_object)]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Sphere {
     radius: f64,
@@ -73,7 +73,7 @@ impl Sphere {
 }
 
 /// A capsule shape (cylinder with hemispherical caps) along Z axis.
-#[pyclass(module = "py_parry3d._internal")]
+#[pyclass(module = "py_parry3d._internal", from_py_object)]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Capsule {
     half_height: f64,
@@ -101,7 +101,7 @@ impl Capsule {
 }
 
 /// A cylinder shape along Z axis.
-#[pyclass(module = "py_parry3d._internal")]
+#[pyclass(module = "py_parry3d._internal", from_py_object)]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Cylinder {
     half_height: f64,
@@ -147,7 +147,7 @@ impl Cylinder {
 /// Use ConvexHull when:
 /// - You need solid collision detection
 /// - Simplified geometry is acceptable
-#[pyclass(module = "py_parry3d._internal")]
+#[pyclass(module = "py_parry3d._internal", from_py_object)]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TriMesh {
     vertices: Vec<[f64; 3]>,
@@ -220,7 +220,7 @@ impl TriMesh {
 /// Use TriMesh when:
 /// - You need exact (possibly concave) mesh geometry
 /// - Surface contact detection is sufficient
-#[pyclass(module = "py_parry3d._internal")]
+#[pyclass(module = "py_parry3d._internal", from_py_object)]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ConvexHull {
     hull_vertices: Vec<[f64; 3]>,
@@ -408,7 +408,7 @@ fn extract_transform_4x4(arr: &PyReadonlyArray2<f64>) -> PyResult<[[f64; 4]; 4]>
 // ============================================================================
 
 /// A shape with an optional local transform.
-#[pyclass(module = "py_parry3d._internal")]
+#[pyclass(module = "py_parry3d._internal", from_py_object)]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CollisionObject {
     shape: ShapeData,
@@ -455,7 +455,7 @@ impl CollisionObject {
 // ============================================================================
 
 /// A named group of collision objects sharing the same transform.
-#[pyclass(module = "py_parry3d._internal")]
+#[pyclass(module = "py_parry3d._internal", from_py_object)]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CollisionGroup {
     #[pyo3(get)]
