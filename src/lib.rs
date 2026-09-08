@@ -37,12 +37,12 @@ impl Box {
 }
 
 impl Box {
-    fn to_shared_shape(&self) -> SharedShape {
-        SharedShape::new(Cuboid::new(Vec3::new(
+    fn to_shared_shape(&self) -> (SharedShape, Pose3) {
+        (SharedShape::new(Cuboid::new(Vec3::new(
             self.half_extents[0],
             self.half_extents[1],
             self.half_extents[2],
-        )))
+        ))), Pose3::IDENTITY)
     }
 }
 
@@ -67,8 +67,8 @@ impl Sphere {
 }
 
 impl Sphere {
-    fn to_shared_shape(&self) -> SharedShape {
-        SharedShape::new(Ball::new(self.radius))
+    fn to_shared_shape(&self) -> (SharedShape, Pose3) {
+        (SharedShape::new(Ball::new(self.radius)), Pose3::IDENTITY)
     }
 }
 
@@ -93,10 +93,10 @@ impl Capsule {
 }
 
 impl Capsule {
-    fn to_shared_shape(&self) -> SharedShape {
+    fn to_shared_shape(&self) -> (SharedShape, Pose3) {
         // Z-axis aligned capsule
         let capsule = ParryCapsule::new_z(self.half_height, self.radius);
-        SharedShape::new(capsule)
+        (SharedShape::new(capsule), Pose3::IDENTITY)
     }
 }
 
@@ -121,13 +121,16 @@ impl Cylinder {
 }
 
 impl Cylinder {
-    fn to_shared_shape(&self) -> SharedShape {
-        // parry3d Cylinder is along Y axis, rotate to Z axis
+    /// parry3d's `Cylinder` is along the Y axis; ours is along Z. The
+    /// reorientation is returned as the shape's intrinsic pose offset rather
+    /// than baked in with a one-element `Compound`: a `Compound` here would
+    /// nest inside the `Compound` a multi-object `CollisionGroup` builds, and
+    /// parry panics on nested composite shapes (#9).
+    fn to_shared_shape(&self) -> (SharedShape, Pose3) {
         // Rotate 90 degrees around X axis: Y -> Z
         let rotation = Rot3::from_axis_angle(Vec3::X, std::f64::consts::FRAC_PI_2);
-        let iso = Pose3::from_rotation(rotation);
         let cylinder = ParryCylinder::new(self.half_height, self.radius);
-        SharedShape::new(Compound::new(vec![(iso, SharedShape::new(cylinder))]))
+        (SharedShape::new(cylinder), Pose3::from_rotation(rotation))
     }
 }
 
@@ -192,7 +195,7 @@ impl TriMesh {
 }
 
 impl TriMesh {
-    fn to_shared_shape(&self) -> SharedShape {
+    fn to_shared_shape(&self) -> (SharedShape, Pose3) {
         let points: Vec<Vec3> = self.vertices
             .iter()
             .map(|v| Vec3::new(v[0], v[1], v[2]))
@@ -200,7 +203,7 @@ impl TriMesh {
 
         let trimesh = ParryTriMesh::new(points, self.faces.clone())
             .expect("Failed to create TriMesh");
-        SharedShape::new(trimesh)
+        (SharedShape::new(trimesh), Pose3::IDENTITY)
     }
 }
 
@@ -309,14 +312,17 @@ impl ConvexHull {
 }
 
 impl ConvexHull {
-    fn to_shared_shape(&self) -> SharedShape {
+    fn to_shared_shape(&self) -> (SharedShape, Pose3) {
         let points: Vec<Vec3> = self.hull_vertices
             .iter()
             .map(|v| Vec3::new(v[0], v[1], v[2]))
             .collect();
 
         // Recreate the convex polyhedron from stored hull vertices
-        SharedShape::new(ConvexPolyhedron::from_convex_hull(&points).unwrap())
+        (
+            SharedShape::new(ConvexPolyhedron::from_convex_hull(&points).unwrap()),
+            Pose3::IDENTITY,
+        )
     }
 }
 
@@ -335,7 +341,11 @@ enum ShapeData {
 }
 
 impl ShapeData {
-    fn to_shared_shape(&self) -> SharedShape {
+    /// The parry shape plus its intrinsic pose offset: the pose that maps the
+    /// shape's own frame onto the frame this crate exposes. Only `Cylinder`
+    /// needs one (parry's cylinder is Y-aligned, ours is Z-aligned); every
+    /// other variant returns the identity.
+    fn to_shared_shape(&self) -> (SharedShape, Pose3) {
         match self {
             ShapeData::Box(s) => s.to_shared_shape(),
             ShapeData::Sphere(s) => s.to_shared_shape(),
@@ -544,17 +554,25 @@ impl CollisionGroup {
     /// local pose is returned alongside so the query can apply it. Dropping
     /// it, as the shortcut used to, tested the shape centred on the group frame
     /// (#1).
+    ///
+    /// A shape may also carry an intrinsic pose offset of its own (a
+    /// `Cylinder` does, to reorient parry's Y-aligned cylinder to Z); it is
+    /// composed onto the object's local pose in both branches.
     fn build_shape(&mut self) -> Arc<(SharedShape, Pose3)> {
         if let Some(ref cached) = self.cached_shape {
             return cached.clone();
         }
 
         let result = if self.objects.len() == 1 {
-            Arc::new((self.objects[0].shape.to_shared_shape(), self.objects[0].to_isometry()))
+            let (shape, shape_offset) = self.objects[0].shape.to_shared_shape();
+            Arc::new((shape, self.objects[0].to_isometry() * shape_offset))
         } else {
             let shapes: Vec<(Pose3, SharedShape)> = self.objects
                 .iter()
-                .map(|o| (o.to_isometry(), o.shape.to_shared_shape()))
+                .map(|o| {
+                    let (shape, shape_offset) = o.shape.to_shared_shape();
+                    (o.to_isometry() * shape_offset, shape)
+                })
                 .collect();
             Arc::new((SharedShape::new(Compound::new(shapes)), Pose3::IDENTITY))
         };
