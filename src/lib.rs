@@ -400,28 +400,20 @@ fn extract_shape(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<ShapeData>
 /// - every element is finite (no `NaN`, no infinity).
 ///
 /// Only the 3x3 rotation block and the `m[0..3][3]` translation column are
-/// read. **The last row is ignored entirely** — it is neither used nor
-/// checked, so a caller that puts a perspective term or garbage there gets no
-/// diagnostic.
+/// read here; the last row is checked at the API boundary (see below) but not
+/// used.
 ///
-/// # Violating the contract is silent
+/// # This function itself does not validate
 ///
-/// Nothing here validates any of the above, and neither does
-/// `extract_transform_4x4`, which only checks the array's `(4, 4)` shape. A
-/// non-rigid matrix produces a garbage pose rather than an error:
-///
-/// - **scale and shear are silently dropped.** `Rot3::from_mat3` is documented
-///   as ill-defined for a non-rotation 3x3 block; it only panics when glam's
-///   `glam_assert` feature is on, which it is not in this build. A transform
-///   scaled 2x moves the shape but leaves it its original size.
-/// - **non-finite input propagates** into the pose instead of being rejected,
-///   and the resulting query answers are meaningless.
-///
-/// This predates the nalgebra to glam migration — the previous implementation
-/// used `nalgebra::Rotation3::from_matrix_unchecked`, equally unchecked.
-/// Adding validation is tracked in #12; it is deliberately not done here
-/// because rejecting input this has always accepted would be a behaviour
-/// change, and does not belong in a dependency migration.
+/// It assumes the contract already holds. Enforcement lives in
+/// `validate_rigid_transform`, called from every Python entry point
+/// (`extract_transform_4x4` and the `(N, 4, 4)` batch paths), because this
+/// function runs once per pose per group inside the Rayon query loop while a
+/// caller-supplied transform crosses the boundary exactly once. A non-rigid
+/// matrix reaching here would still produce a garbage pose rather than an
+/// error: `Rot3::from_mat3` is documented as ill-defined for a 3x3 block
+/// carrying scale or shear, and only panics when glam's `glam_assert` feature
+/// is on, which it is not in this build.
 ///
 /// # Note on layout
 ///
@@ -438,18 +430,117 @@ fn matrix4_to_isometry(m: &[[f64; 4]; 4]) -> Pose3 {
     Pose3::from_parts(translation, Rot3::from_mat3(&rotation))
 }
 
+/// Tolerance for the orthonormality and determinant checks in
+/// [`validate_rigid_transform`].
+///
+/// Chosen to sit between two magnitudes:
+///
+/// - **legitimate float drift.** A rotation accumulated through a chain of
+///   forward-kinematics products or a quaternion round-trip is orthonormal only
+///   to within rounding error; for f64 that is around 1e-15 per operation and
+///   stays near 1e-13 even after a long chain. Such matrices are genuine
+///   rotations and must be accepted.
+/// - **real errors.** A 2x scale is off by 1.0, a shear of 0.5 by 0.5, a
+///   reflection has determinant -1. These are off by order 1, not by an epsilon.
+///
+/// 1e-6 is far above the first and far below the second. Tighten it if callers
+/// turn out to feed cleaner matrices than expected; loosening it would start
+/// accepting transforms that are genuinely not rotations.
+const RIGID_TRANSFORM_TOL: f64 = 1e-6;
+
+/// Tolerance for the bottom row. Effectively an exact check - no legitimate
+/// caller passes anything but `[0, 0, 0, 1]` - but expressed as an absolute
+/// tolerance so a value that survived a float round-trip is not rejected.
+const BOTTOM_ROW_TOL: f64 = 1e-12;
+
+/// Validate that `m` is a rigid transform, as documented on
+/// [`matrix4_to_isometry`].
+///
+/// Checks, in order:
+///
+/// 1. every one of the 16 entries is finite (no `NaN`, no infinity);
+/// 2. the bottom row is `[0, 0, 0, 1]` within [`BOTTOM_ROW_TOL`];
+/// 3. the upper-left 3x3 block is a proper rotation - `R^T R = I` and
+///    `det(R) = +1` within [`RIGID_TRANSFORM_TOL`]. A determinant of -1 is a
+///    reflection, which would mirror the geometry, and is rejected.
+///
+/// `context` is prefixed to the error message so batch call sites can name the
+/// group and index of the offending pose.
+///
+/// This runs at the Python boundary, not inside `matrix4_to_isometry` - the
+/// latter is called once per pose per group inside the Rayon query loop, while
+/// every caller-supplied transform passes through a boundary check exactly
+/// once. Transforms restored by `CollisionWorld.from_bytes` are not re-checked;
+/// they were validated when the world was built.
+fn validate_rigid_transform(m: &[[f64; 4]; 4], context: &str) -> PyResult<()> {
+    // 1. finiteness
+    for (i, row) in m.iter().enumerate() {
+        for (j, &v) in row.iter().enumerate() {
+            if !v.is_finite() {
+                return Err(PyValueError::new_err(format!(
+                    "{context}Transform must be finite, but element [{i}][{j}] is {v}"
+                )));
+            }
+        }
+    }
+
+    // 2. bottom row
+    let expected = [0.0, 0.0, 0.0, 1.0];
+    for j in 0..4 {
+        if (m[3][j] - expected[j]).abs() > BOTTOM_ROW_TOL {
+            return Err(PyValueError::new_err(format!(
+                "{}Transform must have bottom row [0, 0, 0, 1], but got [{}, {}, {}, {}]",
+                context, m[3][0], m[3][1], m[3][2], m[3][3]
+            )));
+        }
+    }
+
+    // 3. proper rotation: R^T R = I and det(R) = +1
+    let r = [
+        [m[0][0], m[0][1], m[0][2]],
+        [m[1][0], m[1][1], m[1][2]],
+        [m[2][0], m[2][1], m[2][2]],
+    ];
+    for a in 0..3 {
+        for b in 0..3 {
+            // (R^T R)[a][b] = dot(column a, column b)
+            let dot = r[0][a] * r[0][b] + r[1][a] * r[1][b] + r[2][a] * r[2][b];
+            let target = if a == b { 1.0 } else { 0.0 };
+            if (dot - target).abs() > RIGID_TRANSFORM_TOL {
+                return Err(PyValueError::new_err(format!(
+                    "{context}Transform rotation block must be orthonormal (no scale or shear): \
+                     (R^T R)[{a}][{b}] = {dot}, expected {target} (tolerance {RIGID_TRANSFORM_TOL:e})"
+                )));
+            }
+        }
+    }
+    let det = r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1])
+        - r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0])
+        + r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0]);
+    if (det - 1.0).abs() > RIGID_TRANSFORM_TOL {
+        return Err(PyValueError::new_err(format!(
+            "{context}Transform rotation block must have determinant +1, but got {det} \
+             (tolerance {RIGID_TRANSFORM_TOL:e}); a determinant of -1 is a reflection"
+        )));
+    }
+
+    Ok(())
+}
+
 fn extract_transform_4x4(arr: &PyReadonlyArray2<f64>) -> PyResult<[[f64; 4]; 4]> {
     let shape = arr.shape();
     if shape != [4, 4] {
         return Err(PyValueError::new_err("Transform must be (4, 4) array"));
     }
     let slice = arr.as_slice()?;
-    Ok([
+    let m = [
         [slice[0], slice[1], slice[2], slice[3]],
         [slice[4], slice[5], slice[6], slice[7]],
         [slice[8], slice[9], slice[10], slice[11]],
         [slice[12], slice[13], slice[14], slice[15]],
-    ])
+    ];
+    validate_rigid_transform(&m, "")?;
+    Ok(m)
 }
 
 // ============================================================================
@@ -792,12 +883,14 @@ impl CollisionWorld {
                 let mut tfs = Vec::with_capacity(n);
                 for i in 0..n {
                     let base = i * 16;
-                    tfs.push([
+                    let m = [
                         [slice[base], slice[base+1], slice[base+2], slice[base+3]],
                         [slice[base+4], slice[base+5], slice[base+6], slice[base+7]],
                         [slice[base+8], slice[base+9], slice[base+10], slice[base+11]],
                         [slice[base+12], slice[base+13], slice[base+14], slice[base+15]],
-                    ]);
+                    ];
+                    validate_rigid_transform(&m, &format!("Transform for '{}' at index {}: ", dynamic_name, i))?;
+                    tfs.push(m);
                 }
                 transform_arrays.insert(dynamic_name.clone(), tfs);
             } else if let Ok(arr2) = arr_any.extract::<PyReadonlyArray2<f64>>() {
@@ -989,12 +1082,14 @@ impl CollisionWorld {
                 let mut tfs = Vec::with_capacity(n);
                 for i in 0..n {
                     let base = i * 16;
-                    tfs.push([
+                    let m = [
                         [slice[base], slice[base+1], slice[base+2], slice[base+3]],
                         [slice[base+4], slice[base+5], slice[base+6], slice[base+7]],
                         [slice[base+8], slice[base+9], slice[base+10], slice[base+11]],
                         [slice[base+12], slice[base+13], slice[base+14], slice[base+15]],
-                    ]);
+                    ];
+                    validate_rigid_transform(&m, &format!("Transform for '{}' at index {}: ", dynamic_name, i))?;
+                    tfs.push(m);
                 }
                 transform_arrays.insert(dynamic_name.clone(), tfs);
             } else if let Ok(arr2) = arr_any.extract::<PyReadonlyArray2<f64>>() {

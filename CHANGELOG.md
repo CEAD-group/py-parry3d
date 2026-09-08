@@ -5,6 +5,64 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.3] - unreleased
+
+### Changed
+
+- **BREAKING: non-rigid and non-finite 4x4 transforms now raise `ValueError`**
+  ([#12], [#16]). Transforms that were previously accepted and silently
+  produced a wrong answer are now rejected at the Python boundary. Every entry
+  point that takes a transform validates it - `CollisionObject(transform=...)`,
+  `CollisionGroup(transform=...)`, and both the `(4, 4)` and `(N, 4, 4)` paths
+  of `check` / `check_any`. Three checks, in order:
+
+  1. every one of the 16 entries is finite - no `NaN`, no `Inf`;
+  2. the bottom row is `[0, 0, 0, 1]` (absolute tolerance 1e-12);
+  3. the upper-left 3x3 block is a proper rotation - `R^T R = I` and
+     `det(R) = +1` within 1e-6. A determinant of -1 is a reflection and is
+     rejected, since it would mirror the geometry.
+
+  The error message names the check that failed and shows the offending value;
+  batch errors name the group and the pose index.
+
+  Callers passing a genuine rotation are unaffected. The 1e-6 orthonormality
+  tolerance sits nine orders of magnitude above the drift of a rotation
+  accumulated through a 50-link forward-kinematics chain (measured at ~1e-15
+  for f64) and far below a real error such as a 2x scale, which is off by 1.0.
+  A caller that was relying on scale or shear being silently dropped, or on a
+  `NaN` pose being answered, now gets an exception.
+
+### Fixed
+
+- **`matrix4_to_isometry` silently accepted non-rigid transforms** ([#12]).
+  It assumes a rigid transform but nothing validated one, and
+  `extract_transform_4x4` checked only the `(4, 4)` shape. Scale and shear were
+  discarded by `Rot3::from_mat3` (documented as ill-defined for such a block,
+  and only panicking with glam's `glam_assert` feature, which is off here), the
+  bottom row was never read, and `NaN`/`Inf` propagated straight into the pose.
+  For a collision checker the failure direction is the dangerous one: a matrix
+  with a 2x scale and a 1.2 translation returned "no collision" where a real 2x
+  box would have collided, and a `NaN` pose returned "collision" from garbage.
+  The realistic trigger is not a deliberate scale matrix but a `NaN` from a
+  diverged IK solve, an uninitialised pose, or a bad interpolation. This
+  predates the glam migration - the nalgebra implementation used
+  `Rotation3::from_matrix_unchecked`.
+
+  Validation lives at the Python boundary, not in `matrix4_to_isometry`, which
+  runs once per pose per group inside the Rayon query loop; a caller-supplied
+  transform crosses the boundary exactly once, so the check is off the hot
+  path. Transforms restored by `CollisionWorld.from_bytes` are not re-checked -
+  they were validated when the world was built.
+
+### Documentation
+
+- The rigid-transform contract is now stated in `README.md`, `EXAMPLES.md` and
+  `DESIGN.md`, and the README quick start no longer uses
+  `np.random.rand(N, 4, 4)` as a placeholder - it is not a rigid transform and
+  would now raise.
+
+[#16]: https://github.com/CEAD-group/py-parry3d/pull/16
+
 ## [0.0.2] - 2026-09-08
 
 ### Fixed
@@ -93,5 +151,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial release.
 
+[0.0.3]: https://github.com/CEAD-group/py-parry3d/compare/v0.0.2...HEAD
 [0.0.2]: https://github.com/CEAD-group/py-parry3d/compare/v0.0.1...v0.0.2
 [0.0.1]: https://github.com/CEAD-group/py-parry3d/releases/tag/v0.0.1

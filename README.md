@@ -31,7 +31,9 @@ world = pp.CollisionWorld([robot_link, obstacle])
 
 # Check collisions for 1000 robot poses
 N = 1000
-transforms = {"robot": np.random.rand(N, 4, 4)}  # Your actual transforms here
+# Transforms must be rigid: a proper rotation in the 3x3 block, a
+# [0, 0, 0, 1] bottom row, and no NaN/Inf. Anything else raises ValueError.
+transforms = {"robot": np.tile(np.eye(4), (N, 1, 1))}  # Your actual poses here
 pairs = [("robot", "obstacle", 0.0)]  # (group_a, group_b, min_distance)
 
 collisions = world.check(transforms, pairs)  # (N, 1) bool array
@@ -76,6 +78,21 @@ env = pp.CollisionGroup("env", [shape], static=True, transform=tf)
 # World
 world = pp.CollisionWorld([robot, env])
 ```
+
+### Transforms
+
+All 4x4 transforms - a `CollisionObject` local offset, a static group's
+transform, and every pose passed to `check`/`check_any` - must be **rigid**:
+
+- the upper-left 3x3 block is a proper rotation (orthonormal, determinant +1);
+  no scale, no shear, no reflection;
+- the bottom row is `[0, 0, 0, 1]`;
+- every entry is finite - no `NaN`, no `Inf`.
+
+Violations raise `ValueError` naming the failed check and the offending value.
+Orthonormality is checked to a tolerance of 1e-6, far above the float drift of
+an accumulated forward-kinematics product (~1e-15) and far below a genuine
+error such as a 2x scale.
 
 ### Collision Checking
 

@@ -107,7 +107,7 @@ Helper functions:
 - `world.check(transforms, pairs)` → `(N, n_pairs)` bool array
 - `world.check_any(transforms, pairs)` → first collision index or None (early-exit)
 
-**NaN handling**: No NaNs allowed in transforms. Caller must filter invalid poses before collision checking.
+**Transform validation**: every 4x4 transform must be rigid - proper rotation (orthonormal, determinant +1) in the 3x3 block, `[0, 0, 0, 1]` bottom row, all entries finite. Violations raise `ValueError` at the Python boundary; NaN/Inf poses are rejected rather than silently answered. Orthonormality tolerance is 1e-6.
 
 ---
 
