@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.0.4] - unreleased
 
+### Changed
+
+- **Dropped Python 3.11 support.** `requires-python` is now `>=3.12`, so pip
+  refuses to install 0.0.4 on 3.11 rather than falling back to an sdist build.
+  3.11 was declared supported but never tested - the CI test matrix has only
+  ever run 3.12, 3.13 and 3.14 - so this aligns the declared support with what
+  is actually verified. Anyone on 3.11 stays on 0.0.3, which continues to work
+  and remains available on PyPI.
+
+- **Reduced the set of prebuilt wheels.** 0.0.3 shipped 74 files; 0.0.4 ships
+  roughly a quarter of that. Wheels are now built only for:
+
+  - manylinux: `x86_64`, `aarch64`
+  - musllinux: `x86_64`, `aarch64`
+  - Windows: `x64`
+  - macOS: `arm64` (Apple silicon)
+
+  for CPython 3.12, 3.13, 3.14 and free-threaded 3.14t.
+
+  Dropped targets: manylinux `i686`/`x86`, `armv7l`, `s390x`, `ppc64le`;
+  musllinux `i686`/`x86`, `armv7l`; Windows `win32`/`x86`. Dropped
+  interpreters: CPython 3.11 (see above) and **PyPy** (`pp311`) on every
+  platform; PyO3's PyPy support is second-class and was never tested here.
+
+  Installing on a dropped target now builds from the sdist, which is still
+  published and requires a Rust toolchain. If you need one of these back, open
+  an issue.
+
 ### Fixed
 
 - **`check` / `check_any` now validate the shape of every `pairs` entry**

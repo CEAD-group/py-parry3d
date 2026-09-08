@@ -44,7 +44,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: x86_64
-          args: --release --out dist --find-interpreter
+          args: --release --out dist -i 3.12 -i 3.13 -i 3.14 -i 3.14t
           sccache: 'true'
           manylinux: auto
       - name: Upload wheels
@@ -76,7 +76,7 @@ jobs:
           PY_VERSION_NO_DOT="${PY_VERSION//./}"
           shopt -s nullglob
           # Match the exact ABI tag: cp314 must not also pick up the
-          # free-threaded cp314t wheel that --find-interpreter builds.
+          # free-threaded cp314t wheel that the build also produces.
           WHL_FILES=(dist/*-cp${PY_VERSION_NO_DOT}-cp${PY_VERSION_NO_DOT}-*.whl)
           if [ ${#WHL_FILES[@]} -eq 0 ]; then
             echo "No matching wheel files found!"
@@ -101,11 +101,7 @@ jobs:
     strategy:
       matrix:
         platform:
-          - target: x86
           - target: aarch64
-          - target: armv7
-          - target: s390x
-          - target: ppc64le
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -115,7 +111,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist -i 3.12 -i 3.13 -i 3.14 -i 3.14t
           sccache: 'true'
           manylinux: auto
       - name: Upload wheels
@@ -132,9 +128,7 @@ jobs:
       matrix:
         platform:
           - target: x86_64
-          - target: x86
           - target: aarch64
-          - target: armv7
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -144,7 +138,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist -i 3.12 -i 3.13 -i 3.14 -i 3.14t
           sccache: 'true'
           manylinux: musllinux_1_2
       - name: Upload wheels
@@ -156,56 +150,55 @@ jobs:
   windows:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     needs: [lint, test]
-    runs-on: ${{ matrix.platform.runner }}
+    runs-on: windows-latest
     strategy:
       matrix:
-        platform:
-          - runner: windows-latest
-            target: x64
-          - runner: windows-latest
-            target: x86
+        # One job per interpreter: setup-python installs exactly that version and
+        # `-i python` targets whatever it put on PATH, so the free-threaded 3.14t
+        # build cannot be lost to interpreter-name guessing the way `-i python3.X`
+        # would lose it.
+        python-version: ["3.12", "3.13", "3.14", "3.14t"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: 3.x
-          architecture: ${{ matrix.platform.target }}
+          python-version: ${{ matrix.python-version }}
+          architecture: x64
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          target: x64
+          args: --release --out dist -i python
           sccache: 'true'
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-windows-${{ matrix.platform.target }}
+          name: wheels-windows-x64-py${{ matrix.python-version }}
           path: dist
 
   macos:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     needs: [lint, test]
-    runs-on: ${{ matrix.platform.runner }}
+    runs-on: macos-15
     strategy:
       matrix:
-        platform:
-          - runner: macos-15
-            target: aarch64
+        # Same one-job-per-interpreter approach as the windows job above.
+        python-version: ["3.12", "3.13", "3.14", "3.14t"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: 3.x
+          python-version: ${{ matrix.python-version }}
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          target: aarch64
+          args: --release --out dist -i python
           sccache: 'true'
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-macos-${{ matrix.platform.target }}
+          name: wheels-macos-aarch64-py${{ matrix.python-version }}
           path: dist
 
   sdist:
