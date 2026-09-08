@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.4] - unreleased
+
+### Fixed
+
+- **`check` / `check_any` now validate the shape of every `pairs` entry**
+  ([#17]). Each entry must be a `(group_a, group_b, min_distance)` 3-tuple;
+  anything else raises `ValueError` naming the offending index, e.g.
+  `pairs[3]: expected a (group_a, group_b, min_distance) 3-tuple, got 4
+  elements`. Previously a too-short tuple raised a bare
+  `IndexError: tuple index out of range` from inside the extension, naming
+  neither the argument nor the pair.
+
+  **Behaviour change:** an over-long tuple (4 or more elements) used to be
+  accepted silently, with the extra elements discarded - the caller got a
+  plausible-looking answer that ignored part of what was passed. It now
+  raises. This fixes a bug rather than removing a deliberate API, but callers
+  who were passing over-long tuples will see a new error.
+
+- Pair element types are validated too: a non-`str` group name or a
+  non-numeric `min_distance` raises `TypeError` naming the index and the
+  field (`pairs[0]: min_distance must be a float, got 'str'`) instead of the
+  contextless `must be real number, not str`.
+
 ## [0.0.3] - 2026-09-08
 
 ### Changed
@@ -146,6 +169,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [#12]: https://github.com/CEAD-group/py-parry3d/issues/12
 [#13]: https://github.com/CEAD-group/py-parry3d/pull/13
 [#14]: https://github.com/CEAD-group/py-parry3d/pull/14
+[#17]: https://github.com/CEAD-group/py-parry3d/issues/17
 
 ## [0.0.1] - 2026-01-08
 
