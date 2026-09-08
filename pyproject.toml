@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "py-parry3d"
 dynamic = ["version"]
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 description = "Python bindings for parry3d collision detection, optimized for batch operations"
 readme = "README.md"
 license = "MIT"

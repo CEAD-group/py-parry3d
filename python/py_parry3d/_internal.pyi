@@ -1,16 +1,15 @@
 """Type stubs for py_parry3d._internal Rust extension."""
 
 from collections.abc import Sequence
-from typing import TypeAlias
 
 import numpy as np
 import numpy.typing as npt
 
 # Type aliases
-Transform: TypeAlias = npt.NDArray[np.float64]  # (4, 4) array
-BatchTransform: TypeAlias = npt.NDArray[np.float64]  # (N, 4, 4) array
-TransformDict: TypeAlias = dict[str, Transform | BatchTransform]
-PairList: TypeAlias = list[tuple[str, str, float]]
+type Transform = npt.NDArray[np.float64]  # (4, 4) array
+type BatchTransform = npt.NDArray[np.float64]  # (N, 4, 4) array
+type TransformDict = dict[str, Transform | BatchTransform]
+type PairList = list[tuple[str, str, float]]
 
 # ============================================================================
 # Shapes
@@ -110,7 +109,7 @@ class ConvexHull:
 
 
 # Type alias for any shape
-Shape: TypeAlias = Box | Sphere | Capsule | Cylinder | TriMesh | ConvexHull
+type Shape = Box | Sphere | Capsule | Cylinder | TriMesh | ConvexHull
 
 
 # ============================================================================
