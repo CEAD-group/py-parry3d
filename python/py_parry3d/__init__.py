@@ -6,7 +6,7 @@ Optimized for batch operations with NumPy arrays.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Protocol, Union
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -20,10 +20,8 @@ if TYPE_CHECKING:
 # Type aliases
 Transform = npt.NDArray[np.float64]  # (4, 4) array
 BatchTransform = npt.NDArray[np.float64]  # (N, 4, 4) array
-TransformLike = Union[Transform, "RigidTransformProtocol"]
-TransformDict = dict[str, Union[Transform, BatchTransform]]
+TransformDict = dict[str, Transform | BatchTransform]
 PairList = list[tuple[str, str, float]]
-
 
 
 class RigidTransformProtocol(Protocol):
@@ -32,7 +30,10 @@ class RigidTransformProtocol(Protocol):
     def as_matrix(self) -> npt.NDArray[np.float64]: ...
 
 
-def _to_matrix(transform: Optional[TransformLike]) -> Optional[npt.NDArray[np.float64]]:
+TransformLike = Transform | RigidTransformProtocol
+
+
+def _to_matrix(transform: TransformLike | None) -> npt.NDArray[np.float64] | None:
     """Convert transform to 4x4 matrix, handling RigidTransform."""
     if transform is None:
         return None
@@ -79,7 +80,7 @@ def TriMesh(vertices: npt.NDArray[np.float64], faces: npt.NDArray[np.uint32]) ->
     return _InternalTriMesh(vertices, faces)
 
 
-def TriMesh_from_trimesh(mesh: "trimesh.Trimesh") -> _InternalTriMesh:
+def TriMesh_from_trimesh(mesh: trimesh.Trimesh) -> _InternalTriMesh:
     """
     Create a TriMesh from a trimesh.Trimesh object.
 
@@ -100,7 +101,7 @@ def TriMesh_from_trimesh(mesh: "trimesh.Trimesh") -> _InternalTriMesh:
 TriMesh.from_trimesh = staticmethod(TriMesh_from_trimesh)  # type: ignore
 
 
-def ConvexHull_from_trimesh(mesh: "trimesh.Trimesh") -> _InternalConvexHull:
+def ConvexHull_from_trimesh(mesh: trimesh.Trimesh) -> _InternalConvexHull:
     """
     Create a convex hull collision shape from a trimesh.Trimesh object.
 
@@ -131,7 +132,7 @@ def ConvexHull_from_trimesh(mesh: "trimesh.Trimesh") -> _InternalConvexHull:
 
 
 # Type alias for any shape
-Shape = Union[Box, Sphere, Capsule, Cylinder, _InternalTriMesh, _InternalConvexHull]
+Shape = Box | Sphere | Capsule | Cylinder | _InternalTriMesh | _InternalConvexHull
 
 
 class CollisionObject:
@@ -140,7 +141,7 @@ class CollisionObject:
     def __init__(
         self,
         shape: Shape,
-        transform: Optional[TransformLike] = None,
+        transform: TransformLike | None = None,
     ) -> None:
         """
         Create a collision object.
@@ -160,9 +161,9 @@ class CollisionGroup:
     def __init__(
         self,
         name: str,
-        objects: list[Union[Shape, CollisionObject]],
+        objects: list[Shape | CollisionObject],
         static: bool = False,
-        transform: Optional[TransformLike] = None,
+        transform: TransformLike | None = None,
     ) -> None:
         """
         Create a collision group.
@@ -240,7 +241,7 @@ class CollisionWorld:
         self,
         transforms: TransformDict,
         pairs: PairList,
-    ) -> Optional[int]:
+    ) -> int | None:
         """
         Check for any collision, returning early on first hit.
 
@@ -255,7 +256,7 @@ class CollisionWorld:
         return self._internal.to_bytes()
 
     @classmethod
-    def from_bytes(cls, data: bytes) -> "CollisionWorld":
+    def from_bytes(cls, data: bytes) -> CollisionWorld:
         """Deserialize a world from bytes."""
         world = cls.__new__(cls)
         world._internal = _internal.CollisionWorld.from_bytes(data)
@@ -276,7 +277,7 @@ set_num_threads = _internal.set_num_threads
 get_num_threads = _internal.get_num_threads
 
 
-__all__ = [
+__all__ = [  # noqa: RUF022  (grouped by category, not sorted)
     # Shapes
     "Box",
     "Sphere",

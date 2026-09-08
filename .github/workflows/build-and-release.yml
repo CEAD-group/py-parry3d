@@ -31,7 +31,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install linter
-        run: pip install ruff
+        run: pip install ruff==0.16.6
       - name: Lint with ruff
         run: ruff check .
 
@@ -80,7 +80,10 @@ jobs:
           set -e
           PY_VERSION="${{ matrix.python-version }}"
           PY_VERSION_NO_DOT="${PY_VERSION//./}"
-          WHL_FILES=(dist/*cp${PY_VERSION_NO_DOT}*.whl)
+          shopt -s nullglob
+          # Match the exact ABI tag: cp314 must not also pick up the
+          # free-threaded cp314t wheel that --find-interpreter builds.
+          WHL_FILES=(dist/*-cp${PY_VERSION_NO_DOT}-cp${PY_VERSION_NO_DOT}-*.whl)
           if [ ${#WHL_FILES[@]} -eq 0 ]; then
             echo "No matching wheel files found!"
             exit 1
