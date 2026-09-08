@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.29.2", features = ["extension-module"] }
 numpy = "0.29"
-parry3d-f64 = { version = "0.26.0", features = ["serde-serialize"] }
+parry3d-f64 = { version = "0.30.2", features = ["serde-serialize"] }
 rayon = "1.12"
 serde = { version = "1.0", features = ["derive"] }
 bincode = "1.3"
