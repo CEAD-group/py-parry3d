@@ -325,3 +325,48 @@ class TestThreading:
 
         # Note: set_num_threads only works before first parallel operation
         # and may fail silently if thread pool is already initialized
+
+
+class TestSingleObjectLocalTransform:
+    """A one-object group must honour that object's local transform (#1).
+
+    The former shortcut returned the bare shape for a lone object, so the
+    pair query tested it centred on the group frame and the offset was lost.
+    """
+
+    @staticmethod
+    def _offset_group(name, dx):
+        tf = np.eye(4, dtype=np.float64)
+        tf[0, 3] = dx
+        return pp.CollisionGroup(name, [pp.CollisionObject(pp.Box([0.5, 0.5, 0.5]), tf)])
+
+    @staticmethod
+    def _origin_box(name, dx=0.0):
+        tf = np.eye(4, dtype=np.float64)
+        tf[0, 3] = dx
+        return pp.CollisionGroup(name, [pp.Box([0.5, 0.5, 0.5])], static=True, transform=tf)
+
+    def test_offset_object_does_not_collide_at_the_origin(self):
+        world = pp.CollisionWorld([self._offset_group("a", 10.0), self._origin_box("b")])
+        transforms = {"a": np.eye(4, dtype=np.float64).reshape(1, 4, 4)}
+        assert not world.check(transforms, [("a", "b", 0.0)])[0]
+
+    def test_offset_object_collides_where_it_actually_is(self):
+        world = pp.CollisionWorld([self._offset_group("a", 10.0), self._origin_box("b", 10.0)])
+        transforms = {"a": np.eye(4, dtype=np.float64).reshape(1, 4, 4)}
+        assert world.check(transforms, [("a", "b", 0.0)])[0]
+
+    def test_distance_query_sees_the_offset(self):
+        world = pp.CollisionWorld([self._offset_group("a", 2.0), self._origin_box("b")])
+        transforms = {"a": np.eye(4, dtype=np.float64).reshape(1, 4, 4)}
+        # Gap between the two unit boxes is 1.0
+        assert not world.check(transforms, [("a", "b", 0.9)])[0]
+        assert world.check(transforms, [("a", "b", 1.1)])[0]
+
+    def test_survives_a_pickle_round_trip(self):
+        import pickle
+
+        world = pp.CollisionWorld([self._offset_group("a", 10.0), self._origin_box("b")])
+        world = pickle.loads(pickle.dumps(world))
+        transforms = {"a": np.eye(4, dtype=np.float64).reshape(1, 4, 4)}
+        assert not world.check(transforms, [("a", "b", 0.0)])[0]

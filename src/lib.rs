@@ -465,7 +465,7 @@ pub struct CollisionGroup {
     is_static: bool,
     static_transform: Option<[[f64; 4]; 4]>,
     #[serde(skip)]
-    cached_shape: Option<Arc<(SharedShape, Vec<Isometry3<f64>>)>>,
+    cached_shape: Option<Arc<(SharedShape, Isometry3<f64>)>>,
 }
 
 #[pymethods]
@@ -535,28 +535,30 @@ impl CollisionGroup {
 }
 
 impl CollisionGroup {
-    fn build_shape(&mut self) -> Arc<(SharedShape, Vec<Isometry3<f64>>)> {
+    /// The group's collision shape plus the isometry to compose onto the group
+    /// pose before querying it.
+    ///
+    /// A multi-object group is a parry `Compound`, which carries every object's
+    /// local isometry itself, so the companion isometry is the identity. A lone
+    /// object is kept as its bare shape — parry's query dispatch does not
+    /// support a `TriMesh` or `ConvexPolyhedron` inside a `Compound` — and its
+    /// local isometry is returned alongside so the query can apply it. Dropping
+    /// it, as the shortcut used to, tested the shape centred on the group frame
+    /// (#1).
+    fn build_shape(&mut self) -> Arc<(SharedShape, Isometry3<f64>)> {
         if let Some(ref cached) = self.cached_shape {
             return cached.clone();
         }
 
-        let local_isometries: Vec<Isometry3<f64>> = self.objects
-            .iter()
-            .map(|o| o.to_isometry())
-            .collect();
-
-        let shape = if self.objects.len() == 1 {
-            self.objects[0].shape.to_shared_shape()
+        let result = if self.objects.len() == 1 {
+            Arc::new((self.objects[0].shape.to_shared_shape(), self.objects[0].to_isometry()))
         } else {
-            // Create compound shape
             let shapes: Vec<(Isometry3<f64>, SharedShape)> = self.objects
                 .iter()
                 .map(|o| (o.to_isometry(), o.shape.to_shared_shape()))
                 .collect();
-            SharedShape::new(Compound::new(shapes))
+            Arc::new((SharedShape::new(Compound::new(shapes)), Isometry3::identity()))
         };
-
-        let result = Arc::new((shape, local_isometries));
         self.cached_shape = Some(result.clone());
         result
     }
@@ -583,7 +585,7 @@ struct CollisionWorldData {
 pub struct CollisionWorld {
     data: CollisionWorldData,
     // Cached shapes (not serialized, rebuilt on load)
-    shapes: Vec<Arc<(SharedShape, Vec<Isometry3<f64>>)>>,
+    shapes: Vec<Arc<(SharedShape, Isometry3<f64>)>>,
 }
 
 #[pymethods]
@@ -776,6 +778,7 @@ impl CollisionWorld {
             shape: SharedShape,
             is_static: bool,
             static_isometry: Option<Isometry3<f64>>,
+            local_offset: Isometry3<f64>,
         }
 
         let group_data: Vec<GroupCheckData> = self.data.groups
@@ -783,6 +786,7 @@ impl CollisionWorld {
             .zip(self.shapes.iter())
             .map(|(g, s)| GroupCheckData {
                 shape: s.0.clone(),
+                local_offset: s.1,
                 is_static: g.is_static,
                 static_isometry: g.get_static_isometry(),
             })
@@ -804,6 +808,11 @@ impl CollisionWorld {
                 for (idx, gd) in group_data.iter().enumerate() {
                     if gd.is_static {
                         isometries[idx] = gd.static_isometry.clone();
+                    }
+                    // A lone object's local transform lives here, not in the
+                    // shape — compose it onto the group pose once per pose.
+                    if let Some(iso) = &isometries[idx] {
+                        isometries[idx] = Some(iso * gd.local_offset);
                     }
                 }
 
@@ -964,6 +973,7 @@ impl CollisionWorld {
             shape: SharedShape,
             is_static: bool,
             static_isometry: Option<Isometry3<f64>>,
+            local_offset: Isometry3<f64>,
         }
 
         let group_data: Vec<GroupCheckData> = self.data.groups
@@ -971,6 +981,7 @@ impl CollisionWorld {
             .zip(self.shapes.iter())
             .map(|(g, s)| GroupCheckData {
                 shape: s.0.clone(),
+                local_offset: s.1,
                 is_static: g.is_static,
                 static_isometry: g.get_static_isometry(),
             })
@@ -992,6 +1003,11 @@ impl CollisionWorld {
                 for (idx, gd) in group_data.iter().enumerate() {
                     if gd.is_static {
                         isometries[idx] = gd.static_isometry.clone();
+                    }
+                    // A lone object's local transform lives here, not in the
+                    // shape — compose it onto the group pose once per pose.
+                    if let Some(iso) = &isometries[idx] {
+                        isometries[idx] = Some(iso * gd.local_offset);
                     }
                 }
 
