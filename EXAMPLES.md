@@ -233,7 +233,14 @@ world.check({"robot_l1": ...}, pairs)  # missing other groups
 # Unknown group name in pairs → ValueError
 pairs = [("robot_l1", "nonexistent", 0.0)]
 
-# No NaNs allowed - caller must filter invalid poses before collision checking
+# Non-rigid or non-finite transform -> ValueError
+world.check({"robot_l1": np.diag([2.0, 2.0, 2.0, 1.0])}, pairs)  # scale
+world.check({"robot_l1": tf_with_nan}, pairs)                    # NaN or Inf
+
+# Transforms must be rigid: proper rotation (orthonormal, determinant +1) in
+# the 3x3 block, [0, 0, 0, 1] bottom row, all entries finite. Scale, shear,
+# reflection and NaN/Inf are rejected rather than silently producing a wrong
+# answer. Filter or repair invalid poses before checking.
 ```
 
 ## Full Example: Robot vs Environment
