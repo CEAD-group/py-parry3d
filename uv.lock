@@ -259,7 +259,7 @@ requires-dist = [
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.7.4" },
     { name = "numpy", specifier = ">=1.26.4" },
     { name = "pytest", marker = "extra == 'test'" },
-    { name = "scipy", marker = "extra == 'test'", specifier = ">=1.14" },
+    { name = "scipy", marker = "extra == 'test'", specifier = ">=1.15" },
     { name = "trimesh", marker = "extra == 'test'" },
 ]
 provides-extras = ["dev", "test"]

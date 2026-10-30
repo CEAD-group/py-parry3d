@@ -488,7 +488,9 @@ class TestCheckPerPose:
         transforms = {}
         for name in world.dynamic_groups:
             tfs = np.tile(np.eye(4), (n, 1, 1))
-            tfs[:, :3, :3] = Rotation.random(n, rng=rng).as_matrix()
+            if n:
+                # SciPy 1.15 rejects an empty batch
+                tfs[:, :3, :3] = Rotation.random(n, rng=rng).as_matrix()
             tfs[:, :3, 3] = rng.uniform(-0.6, 0.6, size=(n, 3))
             transforms[name] = tfs
         pairs = [
