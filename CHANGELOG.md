@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Upgrade PyO3 to 0.30 and rust-numpy to 0.30. No change to the Python API.
+- Build wheels for CPython 3.15 and free-threaded 3.15t, and run the test suite on 3.15. PyO3 0.30 is the first release that supports 3.15 final.
 
 ## [0.0.5] - 2026-10-30
 

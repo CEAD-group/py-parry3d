@@ -44,7 +44,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: x86_64
-          args: --release --out dist -i 3.12 -i 3.13 -i 3.14 -i 3.14t
+          args: --release --out dist -i 3.12 -i 3.13 -i 3.14 -i 3.14t -i 3.15 -i 3.15t
           sccache: 'true'
           manylinux: auto
       - name: Upload wheels
@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.12", "3.13", "3.14"]
+        python-version: ["3.12", "3.13", "3.14", "3.15"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -111,7 +111,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist -i 3.12 -i 3.13 -i 3.14 -i 3.14t
+          args: --release --out dist -i 3.12 -i 3.13 -i 3.14 -i 3.14t -i 3.15 -i 3.15t
           sccache: 'true'
           manylinux: auto
       - name: Upload wheels
@@ -138,7 +138,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist -i 3.12 -i 3.13 -i 3.14 -i 3.14t
+          args: --release --out dist -i 3.12 -i 3.13 -i 3.14 -i 3.14t -i 3.15 -i 3.15t
           sccache: 'true'
           manylinux: musllinux_1_2
       - name: Upload wheels
@@ -157,7 +157,7 @@ jobs:
         # `-i python` targets whatever it put on PATH, so the free-threaded 3.14t
         # build cannot be lost to interpreter-name guessing the way `-i python3.X`
         # would lose it.
-        python-version: ["3.12", "3.13", "3.14", "3.14t"]
+        python-version: ["3.12", "3.13", "3.14", "3.14t", "3.15", "3.15t"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -183,7 +183,7 @@ jobs:
     strategy:
       matrix:
         # Same one-job-per-interpreter approach as the windows job above.
-        python-version: ["3.12", "3.13", "3.14", "3.14t"]
+        python-version: ["3.12", "3.13", "3.14", "3.14t", "3.15", "3.15t"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
