@@ -925,6 +925,36 @@ impl CollisionWorld {
         }))
     }
 
+    /// Index of the first colliding pair at every pose.
+    ///
+    /// Takes the same arguments as `check`. Each pose stops at its first
+    /// colliding pair, and the (N, n_pairs) matrix is never built. A single
+    /// (4, 4) pose counts as N = 1.
+    ///
+    /// Returns: (N,) int64 array - per pose, the index into `pairs` of the
+    /// first colliding pair, or -1 if none collides
+    fn check_per_pose<'py>(
+        &self,
+        py: Python<'py>,
+        transforms: &Bound<'py, PyDict>,
+        pairs: &Bound<'py, PyList>,
+    ) -> PyResult<Bound<'py, PyArray1<i64>>> {
+        let query = self.prepare_query(transforms, pairs)?;
+        let mut first = vec![-1i64; query.n];
+        py.detach(|| {
+            first.par_iter_mut().enumerate().for_each_init(
+                || query.pose_scratch(),
+                |poses, (pose_idx, out)| {
+                    query.fill_poses(pose_idx, poses);
+                    if let Some(pair_idx) = query.first_colliding_pair(poses) {
+                        *out = pair_idx as i64;
+                    }
+                },
+            )
+        });
+        Ok(first.into_pyarray(py))
+    }
+
     /// Serialize to bytes.
     fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let bytes = bincode::serialize(&self.data)
@@ -980,8 +1010,9 @@ impl CollisionWorld {
 
 // Not #[pymethods]: these helpers must not be callable from Python.
 impl CollisionWorld {
-    /// Parse and validate the arguments shared by `check`, `check_any` and
-    /// `check_first`, resolving every group name to an index.
+    /// Parse and validate the arguments shared by `check`, `check_any`,
+    /// `check_first` and `check_per_pose`, resolving every group name to an
+    /// index.
     fn prepare_query(
         &self,
         transforms: &Bound<'_, PyDict>,
@@ -1148,6 +1179,11 @@ impl PreparedQuery<'_> {
     /// Whether any pair collides, stopping at the first one that does.
     fn any_collides(&self, poses: &[Option<Pose3>]) -> bool {
         self.pairs.iter().any(|&pair| self.pair_collides(poses, pair))
+    }
+
+    /// Index of the first pair that collides, stopping there.
+    fn first_colliding_pair(&self, poses: &[Option<Pose3>]) -> Option<usize> {
+        self.pairs.iter().position(|&pair| self.pair_collides(poses, pair))
     }
 
     /// One bool per pair, in `pairs` order.

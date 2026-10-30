@@ -107,6 +107,7 @@ Helper functions:
 - `world.check(transforms, pairs)` → `(N, n_pairs)` bool array
 - `world.check_any(transforms, pairs)` → index of a colliding pose or None (early-exit, nondeterministic index)
 - `world.check_first(transforms, pairs)` → `(index, (n_pairs,) bool array)` for the lowest colliding pose, or None (early-exit, deterministic)
+- `world.check_per_pose(transforms, pairs)` → `(N,)` int64 array, the first colliding pair index per pose or -1 (early-exit per pose); `>= 0` is the per-pose bool
 
 **Transform validation**: every 4x4 transform must be rigid - proper rotation (orthonormal, determinant +1) in the 3x3 block, `[0, 0, 0, 1]` bottom row, all entries finite. Violations raise `ValueError` at the Python boundary; NaN/Inf poses are rejected rather than silently answered. Orthonormality tolerance is 1e-6.
 
@@ -154,4 +155,4 @@ Supports both `to_bytes()`/`from_bytes()` and pickle protocol.
 4. **No Python in hot loop**: All batch work happens in Rust
 5. **Static group caching**: Static group transforms applied once, not per pose
 6. **Distance thresholds**: `min_distance > 0` uses `distance()` query; `min_distance = 0` uses faster `intersection_test()`
-7. **Early-exit**: `check_any()` uses `find_any()` to stop at whichever collision a thread finds first; `check_first()` uses `find_first()`, which skips poses above the lowest hit found so far, then computes the per-pair result for that one pose
+7. **Early-exit**: `check_any()` uses `find_any()` to stop at whichever collision a thread finds first; `check_first()` uses `find_first()`, which skips poses above the lowest hit found so far, then computes the per-pair result for that one pose; `check_per_pose()` stops each pose at its first colliding pair

@@ -274,6 +274,27 @@ class CollisionWorld:
         """
         return self._internal.check_first(transforms, pairs)
 
+    def check_per_pose(
+        self,
+        transforms: TransformDict,
+        pairs: PairList,
+    ) -> npt.NDArray[np.int64]:
+        """
+        Find the first colliding pair at every pose.
+
+        Each pose stops at its first colliding pair, and the ``(N, n_pairs)``
+        matrix of :meth:`check` is never built. ``result >= 0`` gives the
+        per-pose bool, equal to ``check(transforms, pairs).any(axis=1)``.
+
+        :param transforms: Dict mapping dynamic group name to transform array.
+                          Single pose: (4, 4) array per group, counted as N = 1.
+                          Batch: (N, 4, 4) array per group.
+        :param pairs: List of (group_a, group_b, min_distance) tuples.
+        :return: (N,) int64 array: per pose, the index into ``pairs`` of the
+                 first colliding pair, or -1 if no pair collides.
+        """
+        return self._internal.check_per_pose(transforms, pairs)
+
     def to_bytes(self) -> bytes:
         """Serialize the world to bytes (includes pre-built BVHs)."""
         return self._internal.to_bytes()

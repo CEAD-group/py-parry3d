@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deterministic regardless of thread count: it uses Rayon's `find_first`, which
   skips poses above the lowest hit found so far, and computes the per-pair
   result only for the winning pose.
+- **`CollisionWorld.check_per_pose(transforms, pairs)`** returns an `(N,)`
+  int64 array with, per pose, the index into `pairs` of the first colliding
+  pair, or -1 if none collides. `result >= 0` is the per-pose bool, equal to
+  `check(...).any(axis=1)`, without building the `(N, n_pairs)` matrix. Each
+  pose stops at its first colliding pair. Same inputs and validation as
+  `check`; a single `(4, 4)` pose counts as `N = 1`. (#23)
 
 ### Changed
 
