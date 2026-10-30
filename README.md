@@ -82,7 +82,7 @@ world = pp.CollisionWorld([robot, env])
 ### Transforms
 
 All 4x4 transforms - a `CollisionObject` local offset, a static group's
-transform, and every pose passed to `check`/`check_any` - must be **rigid**:
+transform, and every pose passed to `check`/`check_any`/`check_first` - must be **rigid**:
 
 - the upper-left 3x3 block is a proper rotation (orthonormal, determinant +1);
   no scale, no shear, no reflection;
@@ -100,8 +100,11 @@ error such as a 2x scale.
 # Batch check
 result = world.check(transforms, pairs)  # (N, n_pairs) bool array
 
-# Early-exit (stops at first collision)
+# Early-exit (stops at a collision; index may vary between runs)
 idx = world.check_any(transforms, pairs)  # int or None
+
+# Lowest colliding pose plus which pairs collide there (deterministic)
+first = world.check_first(transforms, pairs)  # (int, (n_pairs,) bool array) or None
 ```
 
 ### Pair Helpers

@@ -316,6 +316,144 @@ class TestCheckAny:
         assert result >= 5  # Should be one of the colliding poses
 
 
+class TestCheckFirst:
+    """Lowest colliding pose plus its per-pair results."""
+
+    @staticmethod
+    def _world():
+        """Dynamic sphere "a" against static spheres "b" at the origin and "c" at x=5."""
+        tf_c = np.eye(4, dtype=np.float64)
+        tf_c[0, 3] = 5.0
+        return pp.CollisionWorld([
+            pp.CollisionGroup("a", [pp.Sphere(0.1)]),
+            pp.CollisionGroup("b", [pp.Sphere(0.1)], static=True, transform=np.eye(4)),
+            pp.CollisionGroup("c", [pp.Sphere(0.1)], static=True, transform=tf_c),
+        ])
+
+    @staticmethod
+    def _path(n, x=10.0):
+        """n poses of "a", all far from "b" and "c" by default."""
+        transforms = np.tile(np.eye(4), (n, 1, 1)).astype(np.float64)
+        transforms[:, 0, 3] = x
+        return transforms
+
+    def test_returns_lowest_colliding_index(self):
+        transforms = self._path(12)
+        transforms[[3, 5, 9], 0, 3] = 0.0
+
+        result = self._world().check_first({"a": transforms}, [("a", "b", 0.0)])
+
+        assert result is not None
+        idx, collisions = result
+        assert idx == 3
+        np.testing.assert_array_equal(collisions, [True])
+
+    def test_lowest_index_is_stable_across_runs(self):
+        # Enough poses that several threads search, with later hits they may find first.
+        transforms = self._path(20_000)
+        transforms[[3, 5, 9], 0, 3] = 0.0
+        transforms[10_000:, 0, 3] = 0.0
+        world = self._world()
+
+        for _ in range(20):
+            result = world.check_first({"a": transforms}, [("a", "b", 0.0)])
+            assert result is not None
+            assert result[0] == 3
+
+    def test_multi_pair_bools_follow_pair_order(self):
+        pairs = [("a", "b", 0.0), ("a", "c", 0.0), ("a", "c", 0.1)]
+        transforms = self._path(10)
+        transforms[4, 0, 3] = 5.25  # gap 0.05 to "c": only the min_distance pair
+        transforms[7, 0, 3] = 0.0  # overlaps "b"
+
+        result = self._world().check_first({"a": transforms}, pairs)
+
+        assert result is not None
+        idx, collisions = result
+        assert idx == 4
+        assert collisions.dtype == np.bool_
+        assert collisions.shape == (3,)
+        np.testing.assert_array_equal(collisions, [False, False, True])
+
+    def test_no_collision_returns_none(self):
+        result = self._world().check_first({"a": self._path(10)}, [("a", "b", 0.0), ("a", "c", 0.0)])
+        assert result is None
+
+    def test_empty_pairs_returns_none(self):
+        transforms = self._path(5, x=0.0)
+        assert self._world().check_first({"a": transforms}, []) is None
+
+    def test_single_pose(self):
+        result = self._world().check_first({"a": np.eye(4)}, [("a", "c", 0.0), ("a", "b", 0.0)])
+
+        assert result is not None
+        idx, collisions = result
+        assert idx == 0
+        np.testing.assert_array_equal(collisions, [False, True])
+
+    @pytest.mark.parametrize("seed", [0, 1, 2])
+    def test_consistent_with_check(self, seed):
+        rng = np.random.default_rng(seed)
+        pairs = [("a", "b", 0.0), ("a", "c", 0.0), ("a", "b", 0.5)]
+        transforms = self._path(500)
+        transforms[:, 0, 3] = rng.uniform(-1.0, 6.0, size=500)
+        transforms[:, 1, 3] = rng.uniform(-1.0, 1.0, size=500)
+        world = self._world()
+
+        full = world.check({"a": transforms}, pairs)
+        result = world.check_first({"a": transforms}, pairs)
+
+        hit_rows = np.flatnonzero(full.any(axis=1))
+        assert hit_rows.size > 0
+        assert result is not None
+        idx, collisions = result
+        assert idx == hit_rows[0]
+        np.testing.assert_array_equal(collisions, full[idx])
+
+    @pytest.mark.parametrize(
+        ("transforms", "pairs"),
+        [
+            pytest.param({"a": np.eye(4)}, [("a", "nope", 0.0)], id="unknown_group"),
+            pytest.param({}, [("a", "b", 0.0)], id="missing_transform"),
+            pytest.param({"a": np.eye(4)}, [("a", "b")], id="short_pair_tuple"),
+            pytest.param({"a": np.eye(4)}, [("a", "b", "x")], id="bad_min_distance"),
+            pytest.param({"a": np.eye(4)[:3]}, [("a", "b", 0.0)], id="wrong_shape_single"),
+            pytest.param({"a": np.zeros((2, 3, 4))}, [("a", "b", 0.0)], id="wrong_shape_batch"),
+            pytest.param({"a": "not an array"}, [("a", "b", 0.0)], id="not_an_array"),
+            pytest.param({"a": np.diag([2.0, 2.0, 2.0, 1.0])}, [("a", "b", 0.0)], id="scaled_single"),
+            pytest.param(
+                {"a": np.stack([np.eye(4), np.diag([1.0, 1.0, 1.0, 1.0]) * np.nan])},
+                [("a", "b", 0.0)],
+                id="nan_in_batch",
+            ),
+        ],
+    )
+    def test_invalid_input_raises_like_check(self, transforms, pairs):
+        world = self._world()
+
+        with pytest.raises(Exception) as expected:
+            world.check(transforms, pairs)
+        with pytest.raises(expected.type) as actual:
+            world.check_first(transforms, pairs)
+
+        assert str(actual.value) == str(expected.value)
+
+    def test_batch_size_mismatch_raises_like_check(self):
+        world = pp.CollisionWorld([
+            pp.CollisionGroup("a", [pp.Sphere(0.1)]),
+            pp.CollisionGroup("b", [pp.Sphere(0.1)]),
+        ])
+        for transforms in (
+            {"a": self._path(3), "b": self._path(4)},
+            {"a": self._path(3), "b": np.eye(4)},
+        ):
+            with pytest.raises(ValueError) as expected:
+                world.check(transforms, [("a", "b", 0.0)])
+            with pytest.raises(ValueError) as actual:
+                world.check_first(transforms, [("a", "b", 0.0)])
+            assert str(actual.value) == str(expected.value)
+
+
 class TestThreading:
     """Test threading configuration."""
 

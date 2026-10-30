@@ -171,9 +171,9 @@ collisions = world.check(single_transforms, pairs)  # (n_pairs,) bool array
 ## Early-Exit Check
 
 ```python
-# Stop at first collision found (faster for validation)
+# Stop at the first collision any thread finds (faster for validation)
 result = world.check_any(transforms, pairs)
-# Returns: Optional[int] - index of first pose with collision, or None
+# Returns: Optional[int] - index of a pose with collision, or None
 
 if result is not None:
     print(f"Collision found at pose {result}")
@@ -181,9 +181,29 @@ else:
     print("Path is collision-free")
 
 # Note: Due to parallel execution, this may not return the
-# chronologically-first collision. It returns the first collision
-# found by any thread. For paths where the goal is no collisions,
-# this is sufficient and much faster than full batch check.
+# chronologically-first collision, and the index can differ between runs.
+# For paths where the goal is no collisions, this is sufficient and much
+# faster than full batch check.
+```
+
+## First Collision Along a Path
+
+```python
+# Lowest colliding pose index, plus which pairs collide at that pose
+first = world.check_first(transforms, pairs)
+# Returns: Optional[tuple[int, (n_pairs,) bool array]]
+
+if first is not None:
+    idx, collisions = first
+    colliding = [pairs[k][:2] for k in np.flatnonzero(collisions)]
+    print(f"Path first collides at pose {idx}: {colliding}")
+else:
+    print("Path is collision-free")
+
+# Same inputs as check(). The result is deterministic regardless of thread
+# count: idx equals the first row of check(...) that has any True, and
+# collisions equals that row. Poses after the first hit are skipped once it
+# is known, so this is cheaper than a full check() when a collision is early.
 ```
 
 ## Memory Layout

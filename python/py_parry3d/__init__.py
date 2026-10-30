@@ -243,13 +243,36 @@ class CollisionWorld:
         pairs: PairList,
     ) -> int | None:
         """
-        Check for any collision, returning early on first hit.
+        Check for any collision, returning early on the first hit any thread finds.
+
+        The returned index is a colliding pose, not necessarily the lowest one,
+        and may differ between runs. Use :meth:`check_first` for the lowest.
 
         :param transforms: Dict mapping dynamic group name to transform array.
         :param pairs: List of (group_a, group_b, min_distance) tuples.
-        :return: Index of first pose with collision, or None if no collisions.
+        :return: Index of a pose with collision, or None if no collisions.
         """
         return self._internal.check_any(transforms, pairs)
+
+    def check_first(
+        self,
+        transforms: TransformDict,
+        pairs: PairList,
+    ) -> tuple[int, npt.NDArray[np.bool_]] | None:
+        """
+        Find the lowest-index colliding pose, returning early once it is known.
+
+        Deterministic regardless of the number of threads.
+
+        :param transforms: Dict mapping dynamic group name to transform array.
+                          Single pose: (4, 4) array per group.
+                          Batch: (N, 4, 4) array per group.
+        :param pairs: List of (group_a, group_b, min_distance) tuples.
+        :return: ``(index, collisions)`` where ``index`` is the first pose with
+                 any collision and ``collisions`` is the (n_pairs,) bool array
+                 for that pose, ordered like ``pairs``. None if no collisions.
+        """
+        return self._internal.check_first(transforms, pairs)
 
     def to_bytes(self) -> bytes:
         """Serialize the world to bytes (includes pre-built BVHs)."""

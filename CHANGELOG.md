@@ -5,6 +5,32 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`CollisionWorld.check_first(transforms, pairs)`** returns the lowest
+  colliding pose index together with the `(n_pairs,)` bool array of which pairs
+  collide at that pose, or `None` if no pose collides. It takes the same inputs
+  and applies the same validation as `check`. Unlike `check_any`, the result is
+  deterministic regardless of thread count: it uses Rayon's `find_first`, which
+  skips poses above the lowest hit found so far, and computes the per-pair
+  result only for the winning pose.
+
+### Changed
+
+- `check`, `check_any` and `check_first` now share one parsing, validation and
+  pose-building path. Results and error messages of `check` and `check_any`
+  are unchanged. Group names are resolved to indices once per call, static
+  group poses are composed once per call instead of once per pose, and the
+  per-pose pose buffer is reused instead of allocated for every pose.
+
+### Documentation
+
+- The `check_any` docstrings no longer claim it returns the *first* colliding
+  pose. It returns *a* colliding pose, which can differ between runs; use
+  `check_first` for the lowest.
+
 ## [0.0.4] - 2026-09-08
 
 ### Changed

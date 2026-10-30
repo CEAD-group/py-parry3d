@@ -1,5 +1,5 @@
 use parry3d_f64::math::{Mat3, Pose3, Rot3, Vec3};
-use numpy::{PyArray2, PyArrayMethods, PyReadonlyArray2, PyReadonlyArray3, PyUntypedArrayMethods, IntoPyArray};
+use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, PyReadonlyArray3, PyUntypedArrayMethods, IntoPyArray};
 use parry3d_f64::shape::{
     Ball, Capsule as ParryCapsule, Compound, ConvexPolyhedron, Cuboid,
     Cylinder as ParryCylinder, SharedShape, TriMesh as ParryTriMesh,
@@ -818,180 +818,26 @@ impl CollisionWorld {
         transforms: &Bound<'py, PyDict>,
         pairs: &Bound<'py, PyList>,
     ) -> PyResult<Py<PyAny>> {
-        // Parse pairs (3-tuples with min_distance)
-        let pair_vec = parse_pairs(pairs)?;
-
-        // Validate pair group names
-        for (a, b, _) in &pair_vec {
-            if !self.data.group_indices.contains_key(a) {
-                return Err(PyValueError::new_err(format!("Unknown group: '{}'", a)));
-            }
-            if !self.data.group_indices.contains_key(b) {
-                return Err(PyValueError::new_err(format!("Unknown group: '{}'", b)));
-            }
-        }
-
-        // Parse transforms and determine batch size
-        let mut transform_arrays: HashMap<String, Vec<[[f64; 4]; 4]>> = HashMap::new();
-        let mut batch_size: Option<usize> = None;
-
-        for dynamic_name in &self.data.dynamic_group_names {
-            let arr_obj = transforms.get_item(dynamic_name)?;
-            if arr_obj.is_none() {
-                return Err(PyValueError::new_err(format!(
-                    "Missing transform for dynamic group: '{}'",
-                    dynamic_name
-                )));
-            }
-            let arr_obj = arr_obj.unwrap();
-
-            // Try to interpret as numpy array
-            let arr_any = arr_obj;
-
-            // Check dimensions
-            if let Ok(arr4) = arr_any.extract::<PyReadonlyArray3<f64>>() {
-                // (N, 4, 4) batch
-                let shape = arr4.shape();
-                if shape[1] != 4 || shape[2] != 4 {
-                    return Err(PyValueError::new_err(format!(
-                        "Transform for '{}' must be (N, 4, 4) or (4, 4)",
-                        dynamic_name
-                    )));
-                }
-                let n = shape[0];
-
-                if let Some(bs) = batch_size {
-                    if bs != n {
-                        return Err(PyValueError::new_err(
-                            "All transform arrays must have same batch size"
-                        ));
-                    }
-                } else {
-                    batch_size = Some(n);
-                }
-
-                let slice = arr4.as_slice()?;
-                let mut tfs = Vec::with_capacity(n);
-                for i in 0..n {
-                    let base = i * 16;
-                    let m = [
-                        [slice[base], slice[base+1], slice[base+2], slice[base+3]],
-                        [slice[base+4], slice[base+5], slice[base+6], slice[base+7]],
-                        [slice[base+8], slice[base+9], slice[base+10], slice[base+11]],
-                        [slice[base+12], slice[base+13], slice[base+14], slice[base+15]],
-                    ];
-                    validate_rigid_transform(&m, &format!("Transform for '{}' at index {}: ", dynamic_name, i))?;
-                    tfs.push(m);
-                }
-                transform_arrays.insert(dynamic_name.clone(), tfs);
-            } else if let Ok(arr2) = arr_any.extract::<PyReadonlyArray2<f64>>() {
-                // (4, 4) single
-                let tf = extract_transform_4x4(&arr2)?;
-                if batch_size.is_none() {
-                    batch_size = Some(1);
-                } else if batch_size != Some(1) {
-                    return Err(PyValueError::new_err(
-                        "Mixing single and batch transforms"
-                    ));
-                }
-                transform_arrays.insert(dynamic_name.clone(), vec![tf]);
-            } else {
-                return Err(PyValueError::new_err(format!(
-                    "Transform for '{}' must be numpy array",
-                    dynamic_name
-                )));
-            }
-        }
-
-        let n = batch_size.unwrap_or(1);
-        let n_pairs = pair_vec.len();
-
-        // Convert pairs to indices for faster access
-        let pair_indices: Vec<(usize, usize, f64)> = pair_vec
-            .iter()
-            .map(|(a, b, min_dist)| {
-                (self.data.group_indices[a], self.data.group_indices[b], *min_dist)
-            })
-            .collect();
-
-        // Prepare group data for collision checking
-        struct GroupCheckData {
-            shape: SharedShape,
-            is_static: bool,
-            static_isometry: Option<Pose3>,
-            local_offset: Pose3,
-        }
-
-        let group_data: Vec<GroupCheckData> = self.data.groups
-            .iter()
-            .zip(self.shapes.iter())
-            .map(|(g, s)| GroupCheckData {
-                shape: s.0.clone(),
-                local_offset: s.1,
-                is_static: g.is_static,
-                static_isometry: g.get_static_isometry(),
-            })
-            .collect();
+        let query = self.prepare_query(transforms, pairs)?;
+        let n = query.n;
+        let n_pairs = query.pairs.len();
 
         // Perform collision checking in parallel
         let results: Vec<Vec<bool>> = (0..n)
             .into_par_iter()
-            .map(|pose_idx| {
-                // Build isometries for this pose
-                let mut isometries: Vec<Option<Pose3>> = vec![None; self.data.groups.len()];
-
-                for (name, tfs) in &transform_arrays {
-                    let group_idx = self.data.group_indices[name];
-                    isometries[group_idx] = Some(matrix4_to_isometry(&tfs[pose_idx]));
-                }
-
-                // Set static isometries
-                for (idx, gd) in group_data.iter().enumerate() {
-                    if gd.is_static {
-                        isometries[idx] = gd.static_isometry.clone();
-                    }
-                    // A lone object's local transform lives here, not in the
-                    // shape — compose it onto the group pose once per pose.
-                    if let Some(iso) = &isometries[idx] {
-                        isometries[idx] = Some(iso * gd.local_offset);
-                    }
-                }
-
-                // Check each pair
-                pair_indices
-                    .iter()
-                    .map(|&(idx_a, idx_b, min_dist)| {
-                        let iso_a = match &isometries[idx_a] {
-                            Some(iso) => iso,
-                            None => return false, // NaN or missing
-                        };
-                        let iso_b = match &isometries[idx_b] {
-                            Some(iso) => iso,
-                            None => return false,
-                        };
-
-                        let shape_a = &group_data[idx_a].shape;
-                        let shape_b = &group_data[idx_b].shape;
-
-                        if min_dist > 0.0 {
-                            // Use distance query with threshold
-                            let dist = query::distance(iso_a, shape_a.as_ref(), iso_b, shape_b.as_ref())
-                                .unwrap_or(f64::MAX);
-                            dist < min_dist
-                        } else {
-                            // Use faster intersection test
-                            query::intersection_test(iso_a, shape_a.as_ref(), iso_b, shape_b.as_ref())
-                                .unwrap_or(false)
-                        }
-                    })
-                    .collect()
-            })
+            .map_init(
+                || query.pose_scratch(),
+                |poses, pose_idx| {
+                    query.fill_poses(pose_idx, poses);
+                    query.pair_results(poses)
+                },
+            )
             .collect();
 
         // Convert to numpy array
         if n == 1 {
             // Return (n_pairs,) array
-            let result = results[0].clone().into_pyarray(py);
+            let result = results.into_iter().next().unwrap_or_default().into_pyarray(py);
             Ok(result.into_any().unbind())
         } else {
             // Return (N, n_pairs) array - flatten and reshape
@@ -1002,175 +848,48 @@ impl CollisionWorld {
         }
     }
 
-    /// Check for any collision, returning early on first hit.
+    /// Check for any collision, returning early on the first hit any thread finds.
     ///
-    /// Returns: Optional[int] - index of first pose with collision, or None
+    /// Returns: Optional[int] - index of a pose with collision (not necessarily
+    /// the lowest), or None
     fn check_any<'py>(
         &self,
         _py: Python<'py>,
         transforms: &Bound<'py, PyDict>,
         pairs: &Bound<'py, PyList>,
     ) -> PyResult<Option<usize>> {
-        // Parse pairs (3-tuples with min_distance)
-        let pair_vec = parse_pairs(pairs)?;
+        let query = self.prepare_query(transforms, pairs)?;
+        Ok(query
+            .pose_hits()
+            .find_any(|&(_, hit)| hit)
+            .map(|(pose_idx, _)| pose_idx))
+    }
 
-        // Validate pair group names
-        for (a, b, _) in &pair_vec {
-            if !self.data.group_indices.contains_key(a) {
-                return Err(PyValueError::new_err(format!("Unknown group: '{}'", a)));
-            }
-            if !self.data.group_indices.contains_key(b) {
-                return Err(PyValueError::new_err(format!("Unknown group: '{}'", b)));
-            }
-        }
+    /// Find the lowest-index colliding pose and its per-pair results.
+    ///
+    /// Takes the same arguments as `check`. Deterministic regardless of the
+    /// number of threads.
+    ///
+    /// Returns: Optional[tuple[int, (n_pairs,) bool array]] - the first pose
+    /// with any collision and which pairs collide there, or None
+    fn check_first<'py>(
+        &self,
+        py: Python<'py>,
+        transforms: &Bound<'py, PyDict>,
+        pairs: &Bound<'py, PyList>,
+    ) -> PyResult<Option<(usize, Bound<'py, PyArray1<bool>>)>> {
+        let query = self.prepare_query(transforms, pairs)?;
+        // find_first returns the lowest matching index, unlike find_any.
+        let first = query
+            .pose_hits()
+            .find_first(|&(_, hit)| hit)
+            .map(|(pose_idx, _)| pose_idx);
 
-        // Parse transforms and determine batch size
-        let mut transform_arrays: HashMap<String, Vec<[[f64; 4]; 4]>> = HashMap::new();
-        let mut batch_size: Option<usize> = None;
-
-        for dynamic_name in &self.data.dynamic_group_names {
-            let arr_obj = transforms.get_item(dynamic_name)?;
-            if arr_obj.is_none() {
-                return Err(PyValueError::new_err(format!(
-                    "Missing transform for dynamic group: '{}'",
-                    dynamic_name
-                )));
-            }
-            let arr_obj = arr_obj.unwrap();
-
-            let arr_any = arr_obj;
-
-            if let Ok(arr4) = arr_any.extract::<PyReadonlyArray3<f64>>() {
-                let shape = arr4.shape();
-                if shape[1] != 4 || shape[2] != 4 {
-                    return Err(PyValueError::new_err(format!(
-                        "Transform for '{}' must be (N, 4, 4) or (4, 4)",
-                        dynamic_name
-                    )));
-                }
-                let n = shape[0];
-
-                if let Some(bs) = batch_size {
-                    if bs != n {
-                        return Err(PyValueError::new_err(
-                            "All transform arrays must have same batch size"
-                        ));
-                    }
-                } else {
-                    batch_size = Some(n);
-                }
-
-                let slice = arr4.as_slice()?;
-                let mut tfs = Vec::with_capacity(n);
-                for i in 0..n {
-                    let base = i * 16;
-                    let m = [
-                        [slice[base], slice[base+1], slice[base+2], slice[base+3]],
-                        [slice[base+4], slice[base+5], slice[base+6], slice[base+7]],
-                        [slice[base+8], slice[base+9], slice[base+10], slice[base+11]],
-                        [slice[base+12], slice[base+13], slice[base+14], slice[base+15]],
-                    ];
-                    validate_rigid_transform(&m, &format!("Transform for '{}' at index {}: ", dynamic_name, i))?;
-                    tfs.push(m);
-                }
-                transform_arrays.insert(dynamic_name.clone(), tfs);
-            } else if let Ok(arr2) = arr_any.extract::<PyReadonlyArray2<f64>>() {
-                let tf = extract_transform_4x4(&arr2)?;
-                if batch_size.is_none() {
-                    batch_size = Some(1);
-                } else if batch_size != Some(1) {
-                    return Err(PyValueError::new_err(
-                        "Mixing single and batch transforms"
-                    ));
-                }
-                transform_arrays.insert(dynamic_name.clone(), vec![tf]);
-            } else {
-                return Err(PyValueError::new_err(format!(
-                    "Transform for '{}' must be numpy array",
-                    dynamic_name
-                )));
-            }
-        }
-
-        let n = batch_size.unwrap_or(1);
-
-        // Convert pairs to indices for faster access
-        let pair_indices: Vec<(usize, usize, f64)> = pair_vec
-            .iter()
-            .map(|(a, b, min_dist)| {
-                (self.data.group_indices[a], self.data.group_indices[b], *min_dist)
-            })
-            .collect();
-
-        // Prepare group data
-        struct GroupCheckData {
-            shape: SharedShape,
-            is_static: bool,
-            static_isometry: Option<Pose3>,
-            local_offset: Pose3,
-        }
-
-        let group_data: Vec<GroupCheckData> = self.data.groups
-            .iter()
-            .zip(self.shapes.iter())
-            .map(|(g, s)| GroupCheckData {
-                shape: s.0.clone(),
-                local_offset: s.1,
-                is_static: g.is_static,
-                static_isometry: g.get_static_isometry(),
-            })
-            .collect();
-
-        // Use find_any for early exit - returns first collision found by any thread
-        let result: Option<usize> = (0..n)
-            .into_par_iter()
-            .find_any(|&pose_idx| {
-                // Build isometries for this pose
-                let mut isometries: Vec<Option<Pose3>> = vec![None; self.data.groups.len()];
-
-                for (name, tfs) in &transform_arrays {
-                    let group_idx = self.data.group_indices[name];
-                    isometries[group_idx] = Some(matrix4_to_isometry(&tfs[pose_idx]));
-                }
-
-                // Set static isometries
-                for (idx, gd) in group_data.iter().enumerate() {
-                    if gd.is_static {
-                        isometries[idx] = gd.static_isometry.clone();
-                    }
-                    // A lone object's local transform lives here, not in the
-                    // shape — compose it onto the group pose once per pose.
-                    if let Some(iso) = &isometries[idx] {
-                        isometries[idx] = Some(iso * gd.local_offset);
-                    }
-                }
-
-                // Check if any pair collides
-                pair_indices.iter().any(|&(idx_a, idx_b, min_dist)| {
-                    let iso_a = match &isometries[idx_a] {
-                        Some(iso) => iso,
-                        None => return false,
-                    };
-                    let iso_b = match &isometries[idx_b] {
-                        Some(iso) => iso,
-                        None => return false,
-                    };
-
-                    let shape_a = &group_data[idx_a].shape;
-                    let shape_b = &group_data[idx_b].shape;
-
-                    if min_dist > 0.0 {
-                        let dist = query::distance(iso_a, shape_a.as_ref(), iso_b, shape_b.as_ref())
-                            .unwrap_or(f64::MAX);
-                        dist < min_dist
-                    } else {
-                        query::intersection_test(iso_a, shape_a.as_ref(), iso_b, shape_b.as_ref())
-                            .unwrap_or(false)
-                    }
-                })
-            });
-
-        Ok(result)
+        Ok(first.map(|pose_idx| {
+            let mut poses = query.pose_scratch();
+            query.fill_poses(pose_idx, &mut poses);
+            (pose_idx, query.pair_results(&poses).into_pyarray(py))
+        }))
     }
 
     /// Serialize to bytes.
@@ -1223,6 +942,207 @@ impl CollisionWorld {
         let cls = py.get_type::<CollisionWorld>();
         let state = self.to_bytes(py)?;
         Ok((cls.getattr("from_bytes")?.into(), (state,)))
+    }
+}
+
+// Not #[pymethods]: these helpers must not be callable from Python.
+impl CollisionWorld {
+    /// Parse and validate the arguments shared by `check`, `check_any` and
+    /// `check_first`, resolving every group name to an index.
+    fn prepare_query(
+        &self,
+        transforms: &Bound<'_, PyDict>,
+        pairs: &Bound<'_, PyList>,
+    ) -> PyResult<PreparedQuery<'_>> {
+        let pairs = self.resolve_pairs(&parse_pairs(pairs)?)?;
+        let (n, dynamic) = self.parse_transforms(transforms)?;
+
+        // Static poses are fixed, so they are composed once rather than per pose.
+        let base_poses = self
+            .data
+            .groups
+            .iter()
+            .zip(self.shapes.iter())
+            .map(|(g, s)| {
+                if g.is_static {
+                    g.get_static_isometry().map(|iso| iso * s.1)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Ok(PreparedQuery {
+            n,
+            pairs,
+            dynamic,
+            shapes: &self.shapes,
+            base_poses,
+        })
+    }
+
+    /// Map `(group_a, group_b, min_distance)` names to group indices.
+    fn resolve_pairs(&self, pairs: &[(String, String, f64)]) -> PyResult<Vec<(usize, usize, f64)>> {
+        let index_of = |name: &str| {
+            self.data
+                .group_indices
+                .get(name)
+                .copied()
+                .ok_or_else(|| PyValueError::new_err(format!("Unknown group: '{}'", name)))
+        };
+        pairs
+            .iter()
+            .map(|(a, b, min_dist)| Ok((index_of(a)?, index_of(b)?, *min_dist)))
+            .collect()
+    }
+
+    /// Read and validate the transform of every dynamic group.
+    ///
+    /// Returns the batch size (1 for `(4, 4)` transforms) and, per dynamic
+    /// group, its index and one matrix per pose.
+    fn parse_transforms(
+        &self,
+        transforms: &Bound<'_, PyDict>,
+    ) -> PyResult<(usize, DynamicTransforms)> {
+        let mut dynamic = Vec::with_capacity(self.data.dynamic_group_names.len());
+        let mut batch_size: Option<usize> = None;
+
+        for dynamic_name in &self.data.dynamic_group_names {
+            let Some(arr_any) = transforms.get_item(dynamic_name)? else {
+                return Err(PyValueError::new_err(format!(
+                    "Missing transform for dynamic group: '{}'",
+                    dynamic_name
+                )));
+            };
+
+            let tfs = if let Ok(arr4) = arr_any.extract::<PyReadonlyArray3<f64>>() {
+                // (N, 4, 4) batch
+                let shape = arr4.shape();
+                if shape[1] != 4 || shape[2] != 4 {
+                    return Err(PyValueError::new_err(format!(
+                        "Transform for '{}' must be (N, 4, 4) or (4, 4)",
+                        dynamic_name
+                    )));
+                }
+                let n = shape[0];
+
+                if let Some(bs) = batch_size {
+                    if bs != n {
+                        return Err(PyValueError::new_err(
+                            "All transform arrays must have same batch size"
+                        ));
+                    }
+                } else {
+                    batch_size = Some(n);
+                }
+
+                let slice = arr4.as_slice()?;
+                let mut tfs = Vec::with_capacity(n);
+                for i in 0..n {
+                    let base = i * 16;
+                    let m = [
+                        [slice[base], slice[base+1], slice[base+2], slice[base+3]],
+                        [slice[base+4], slice[base+5], slice[base+6], slice[base+7]],
+                        [slice[base+8], slice[base+9], slice[base+10], slice[base+11]],
+                        [slice[base+12], slice[base+13], slice[base+14], slice[base+15]],
+                    ];
+                    validate_rigid_transform(&m, &format!("Transform for '{}' at index {}: ", dynamic_name, i))?;
+                    tfs.push(m);
+                }
+                tfs
+            } else if let Ok(arr2) = arr_any.extract::<PyReadonlyArray2<f64>>() {
+                // (4, 4) single
+                let tf = extract_transform_4x4(&arr2)?;
+                if batch_size.is_none() {
+                    batch_size = Some(1);
+                } else if batch_size != Some(1) {
+                    return Err(PyValueError::new_err(
+                        "Mixing single and batch transforms"
+                    ));
+                }
+                vec![tf]
+            } else {
+                return Err(PyValueError::new_err(format!(
+                    "Transform for '{}' must be numpy array",
+                    dynamic_name
+                )));
+            };
+            dynamic.push((self.data.group_indices[dynamic_name], tfs));
+        }
+
+        Ok((batch_size.unwrap_or(1), dynamic))
+    }
+}
+
+/// Per dynamic group: its index and one matrix per pose.
+type DynamicTransforms = Vec<(usize, Vec<[[f64; 4]; 4]>)>;
+
+/// A validated collision query with all group names resolved to indices.
+struct PreparedQuery<'a> {
+    /// Number of poses.
+    n: usize,
+    /// `(group_a, group_b, min_distance)` as group indices, in `pairs` order.
+    pairs: Vec<(usize, usize, f64)>,
+    dynamic: DynamicTransforms,
+    /// Shape and local pose offset per group.
+    shapes: &'a [Arc<(SharedShape, Pose3)>],
+    /// Pose per group with static groups already filled in.
+    base_poses: Vec<Option<Pose3>>,
+}
+
+impl PreparedQuery<'_> {
+    /// Per-thread buffer for `fill_poses`, so the pose loop does not allocate.
+    fn pose_scratch(&self) -> Vec<Option<Pose3>> {
+        self.base_poses.clone()
+    }
+
+    /// Write every dynamic group's pose at `pose_idx` into `poses`.
+    fn fill_poses(&self, pose_idx: usize, poses: &mut [Option<Pose3>]) {
+        for (group_idx, tfs) in &self.dynamic {
+            // A lone object's local transform lives in the offset, not in the shape.
+            let offset = self.shapes[*group_idx].1;
+            poses[*group_idx] = Some(matrix4_to_isometry(&tfs[pose_idx]) * offset);
+        }
+    }
+
+    fn pair_collides(&self, poses: &[Option<Pose3>], (idx_a, idx_b, min_dist): (usize, usize, f64)) -> bool {
+        let (Some(iso_a), Some(iso_b)) = (&poses[idx_a], &poses[idx_b]) else {
+            return false;
+        };
+        let shape_a = &self.shapes[idx_a].0;
+        let shape_b = &self.shapes[idx_b].0;
+
+        if min_dist > 0.0 {
+            // Use distance query with threshold
+            let dist = query::distance(iso_a, shape_a.as_ref(), iso_b, shape_b.as_ref())
+                .unwrap_or(f64::MAX);
+            dist < min_dist
+        } else {
+            // Use faster intersection test
+            query::intersection_test(iso_a, shape_a.as_ref(), iso_b, shape_b.as_ref())
+                .unwrap_or(false)
+        }
+    }
+
+    /// Whether any pair collides, stopping at the first one that does.
+    fn any_collides(&self, poses: &[Option<Pose3>]) -> bool {
+        self.pairs.iter().any(|&pair| self.pair_collides(poses, pair))
+    }
+
+    /// One bool per pair, in `pairs` order.
+    fn pair_results(&self, poses: &[Option<Pose3>]) -> Vec<bool> {
+        self.pairs.iter().map(|&pair| self.pair_collides(poses, pair)).collect()
+    }
+
+    /// `(pose_idx, any pair collides)` for every pose, reusing one pose buffer per job.
+    fn pose_hits(&self) -> impl ParallelIterator<Item = (usize, bool)> + '_ {
+        (0..self.n).into_par_iter().map_init(
+            || self.pose_scratch(),
+            |poses, pose_idx| {
+                self.fill_poses(pose_idx, poses);
+                (pose_idx, self.any_collides(poses))
+            },
+        )
     }
 }
 
@@ -1379,7 +1299,7 @@ fn transform<'py>(
 
 /// Set the number of threads for parallel operations.
 ///
-/// Must be called BEFORE the first parallel operation (check/check_any).
+/// Must be called BEFORE the first parallel operation (check/check_any/check_first).
 /// Returns True if successful, False if thread pool was already initialized.
 #[pyfunction]
 fn set_num_threads(n: usize) -> bool {
