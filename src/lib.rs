@@ -527,6 +527,32 @@ fn validate_rigid_transform(m: &[[f64; 4]; 4], context: &str) -> PyResult<()> {
     Ok(())
 }
 
+/// Convert the row-major `(N, 4, 4)` data of group `name` into matrices,
+/// validating every one, in parallel.
+///
+/// On failure the error names the group and the lowest invalid index, exactly
+/// as a serial scan would. The context string costs about 200 ns per matrix to
+/// format, more than the check itself, so it is only built for the matrix that
+/// fails.
+fn batch_transforms(slice: &[f64], name: &str) -> PyResult<Vec<[[f64; 4]; 4]>> {
+    let tfs: Vec<[[f64; 4]; 4]> = slice
+        .par_chunks_exact(16)
+        .map(|c| [
+            [c[0], c[1], c[2], c[3]],
+            [c[4], c[5], c[6], c[7]],
+            [c[8], c[9], c[10], c[11]],
+            [c[12], c[13], c[14], c[15]],
+        ])
+        .collect();
+    if let Some(i) = tfs
+        .par_iter()
+        .position_first(|m| validate_rigid_transform(m, "").is_err())
+    {
+        validate_rigid_transform(&tfs[i], &format!("Transform for '{}' at index {}: ", name, i))?;
+    }
+    Ok(tfs)
+}
+
 fn extract_transform_4x4(arr: &PyReadonlyArray2<f64>) -> PyResult<[[f64; 4]; 4]> {
     let shape = arr.shape();
     if shape != [4, 4] {
@@ -1036,20 +1062,7 @@ impl CollisionWorld {
                     batch_size = Some(n);
                 }
 
-                let slice = arr4.as_slice()?;
-                let mut tfs = Vec::with_capacity(n);
-                for i in 0..n {
-                    let base = i * 16;
-                    let m = [
-                        [slice[base], slice[base+1], slice[base+2], slice[base+3]],
-                        [slice[base+4], slice[base+5], slice[base+6], slice[base+7]],
-                        [slice[base+8], slice[base+9], slice[base+10], slice[base+11]],
-                        [slice[base+12], slice[base+13], slice[base+14], slice[base+15]],
-                    ];
-                    validate_rigid_transform(&m, &format!("Transform for '{}' at index {}: ", dynamic_name, i))?;
-                    tfs.push(m);
-                }
-                tfs
+                batch_transforms(arr4.as_slice()?, dynamic_name)?
             } else if let Ok(arr2) = arr_any.extract::<PyReadonlyArray2<f64>>() {
                 // (4, 4) single
                 let tf = extract_transform_4x4(&arr2)?;
