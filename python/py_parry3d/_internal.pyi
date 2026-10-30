@@ -182,12 +182,20 @@ class CollisionWorld:
         self,
         transforms: TransformDict,
         pairs: PairList,
+        *,
+        threads: int | None = None,
     ) -> npt.NDArray[np.bool_]:
         """
         Check collisions for given transforms and pairs.
 
         :param transforms: Dict mapping dynamic group name to transform array.
         :param pairs: List of (group_a, group_b, min_distance) tuples to check.
+        :param threads: Keyword-only cap on the worker threads for this call, covering
+                        both transform validation and the query loop. None (default)
+                        uses the process-wide pool (see :func:`set_num_threads`); 1 runs
+                        serially in the calling thread; n >= 2 uses a cached pool of n
+                        threads. Values below 1 raise ValueError. Results do not depend
+                        on it, apart from which colliding pose ``check_any`` reports.
         :return: Boolean array. Single pose: (n_pairs,). Batch: (N, n_pairs).
         """
 
@@ -195,6 +203,8 @@ class CollisionWorld:
         self,
         transforms: TransformDict,
         pairs: PairList,
+        *,
+        threads: int | None = None,
     ) -> int | None:
         """
         Check for any collision, returning early on the first hit any thread finds.
@@ -203,6 +213,12 @@ class CollisionWorld:
 
         :param transforms: Dict mapping dynamic group name to transform array.
         :param pairs: List of (group_a, group_b, min_distance) tuples to check.
+        :param threads: Keyword-only cap on the worker threads for this call, covering
+                        both transform validation and the query loop. None (default)
+                        uses the process-wide pool (see :func:`set_num_threads`); 1 runs
+                        serially in the calling thread; n >= 2 uses a cached pool of n
+                        threads. Values below 1 raise ValueError. Results do not depend
+                        on it, apart from which colliding pose ``check_any`` reports.
         :return: Index of a pose with collision, or None if no collisions.
         """
 
@@ -210,12 +226,20 @@ class CollisionWorld:
         self,
         transforms: TransformDict,
         pairs: PairList,
+        *,
+        threads: int | None = None,
     ) -> tuple[int, npt.NDArray[np.bool_]] | None:
         """
         Find the lowest-index colliding pose, deterministic regardless of thread count.
 
         :param transforms: Dict mapping dynamic group name to transform array.
         :param pairs: List of (group_a, group_b, min_distance) tuples to check.
+        :param threads: Keyword-only cap on the worker threads for this call, covering
+                        both transform validation and the query loop. None (default)
+                        uses the process-wide pool (see :func:`set_num_threads`); 1 runs
+                        serially in the calling thread; n >= 2 uses a cached pool of n
+                        threads. Values below 1 raise ValueError. Results do not depend
+                        on it, apart from which colliding pose ``check_any`` reports.
         :return: (index, (n_pairs,) bool array for that pose), or None if no collisions.
         """
 
@@ -223,13 +247,22 @@ class CollisionWorld:
         self,
         transforms: TransformDict,
         pairs: PairList,
+        *,
+        threads: int | None = None,
     ) -> npt.NDArray[np.int64]:
         """
         Find the first colliding pair at every pose, stopping there per pose.
 
         :param transforms: Dict mapping dynamic group name to transform array.
         :param pairs: List of (group_a, group_b, min_distance) tuples to check.
+        :param threads: Keyword-only cap on the worker threads for this call, covering
+                        both transform validation and the query loop. None (default)
+                        uses the process-wide pool (see :func:`set_num_threads`); 1 runs
+                        serially in the calling thread; n >= 2 uses a cached pool of n
+                        threads. Values below 1 raise ValueError. Results do not depend
+                        on it, apart from which colliding pose ``check_any`` reports.
         :return: (N,) int64 array of the first colliding pair index per pose, -1 if none.
+                 Always 1-D: a single (4, 4) pose and a (1, 4, 4) batch both give shape (1,).
         """
 
     def to_bytes(self) -> bytes:
@@ -289,10 +322,11 @@ def transform(
 
 def set_num_threads(n: int) -> bool:
     """
-    Set the number of threads for parallel operations.
+    Set the size of the process-wide thread pool used by parallel operations.
 
     Must be called BEFORE the first parallel operation (check/check_any/check_first/check_per_pose).
-    Once the thread pool is initialized, this function has no effect.
+    Once the thread pool is initialized, this function has no effect. To cap a
+    single call instead, pass ``threads=`` to that method.
 
     :param n: Number of threads to use.
     :return: True if successful, False if thread pool was already initialized.
@@ -300,4 +334,8 @@ def set_num_threads(n: int) -> bool:
 
 
 def get_num_threads() -> int:
-    """Get the current number of threads for parallel operations."""
+    """Get the size of the process-wide thread pool (calls with ``threads=`` may use fewer)."""
+
+
+def _probe_workers(items: int, threads: int | None = None) -> int:
+    """Test hook: number of distinct threads that run ``items`` 1 ms jobs for ``threads``."""

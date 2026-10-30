@@ -124,7 +124,37 @@ All arrays must be:
 
 ## Threading
 
-Configurable thread count via `set_num_threads()`. Default: all cores.
+The four batched `CollisionWorld` queries (`check`, `check_any`, `check_first`,
+`check_per_pose`) are the only methods that run in parallel, so they are the
+only ones that take `threads`. Two controls set how many threads they use:
+
+- `set_num_threads(n)` sets the size of the process-wide default pool (default:
+  all cores). It only works before the first parallel call and returns `False`
+  after that.
+- `threads=` (keyword-only) caps a single call and overrides the default for
+  that call. `None` (the default) uses the process-wide pool, `1` runs serially
+  in the calling thread without any pool, and `n >= 2` runs on a pool of `n`
+  threads. `threads < 1` raises `ValueError`. The cap covers both transform
+  validation and the query loop, and results do not depend on it, apart from
+  which colliding pose `check_any` reports.
+
+Pools for `threads >= 2` are built on first use and cached per thread count
+for the life of the process, so their idle threads stay alive (asleep) between
+calls, and each distinct value keeps its own pool.
+
+Implementation notes:
+
+- The GIL is released for the parallel work in every case. Python-side
+  parsing between groups still holds it, so each group's batch validation and
+  the query loop are separate `install` calls on the capped pool.
+- `threads=1` creates no pool. Every parallel iterator gets
+  `with_min_len(usize::MAX)`, so Rayon never splits it and, called from outside
+  any pool, runs it in the calling thread.
+- A call over at most one pose skips the pool hop, since Rayon would not split
+  that work anyway.
+- Pools are cached because building one costs roughly 15 to 20 us per thread,
+  more than a small query. Concurrent calls with the same `threads` value share
+  that pool, so together they also stay within `threads` workers.
 
 ---
 

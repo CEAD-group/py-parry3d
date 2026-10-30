@@ -582,6 +582,171 @@ class TestThreading:
         # and may fail silently if thread pool is already initialized
 
 
+THREAD_VALUES = [None, 1, 2, 3]
+
+
+class TestPerCallThreads:
+    """The keyword-only ``threads`` cap changes where work runs, never the result."""
+
+    @staticmethod
+    def world_and_poses(n: int = 3_000, seed: int = 5):
+        return TestCheckPerPose.random_world_and_poses(n, seed=seed)
+
+    def test_check_identical(self):
+        world, transforms, pairs = self.world_and_poses()
+        expected = world.check(transforms, pairs)
+        assert expected.any() and not expected.all()
+        for threads in THREAD_VALUES:
+            np.testing.assert_array_equal(world.check(transforms, pairs, threads=threads), expected)
+
+    def test_check_per_pose_identical(self):
+        world, transforms, pairs = self.world_and_poses()
+        expected = world.check_per_pose(transforms, pairs)
+        assert set(expected) == set(range(-1, len(pairs)))
+        for threads in THREAD_VALUES:
+            result = world.check_per_pose(transforms, pairs, threads=threads)
+            assert result.dtype == np.int64
+            np.testing.assert_array_equal(result, expected)
+
+    def test_check_first_identical(self):
+        world, transforms, pairs = self.world_and_poses()
+        full = world.check(transforms, pairs)
+        first = int(np.flatnonzero(full.any(axis=1))[0])
+        for threads in THREAD_VALUES:
+            result = world.check_first(transforms, pairs, threads=threads)
+            assert result is not None
+            assert result[0] == first
+            np.testing.assert_array_equal(result[1], full[first])
+
+    def test_check_any_returns_a_colliding_pose(self):
+        world, transforms, pairs = self.world_and_poses()
+        hits = world.check(transforms, pairs).any(axis=1)
+        for threads in THREAD_VALUES:
+            idx = world.check_any(transforms, pairs, threads=threads)
+            assert idx is not None
+            assert hits[idx]
+
+    def test_no_collision_agrees(self):
+        world, transforms, _ = self.world_and_poses()
+        pairs = [("a", "floor", 0.0)]
+        for name in transforms:
+            transforms[name][:, 2, 3] += 3.0
+        for threads in THREAD_VALUES:
+            assert not world.check(transforms, pairs, threads=threads).any()
+            assert world.check_any(transforms, pairs, threads=threads) is None
+            assert world.check_first(transforms, pairs, threads=threads) is None
+            np.testing.assert_array_equal(world.check_per_pose(transforms, pairs, threads=threads), -1)
+
+    @pytest.mark.parametrize("n", [0, 1])
+    def test_tiny_batches(self, n):
+        world, transforms, pairs = self.world_and_poses(n)
+        expected = world.check(transforms, pairs)
+        expected_per_pose = world.check_per_pose(transforms, pairs)
+        for threads in THREAD_VALUES:
+            np.testing.assert_array_equal(world.check(transforms, pairs, threads=threads), expected)
+            np.testing.assert_array_equal(world.check_per_pose(transforms, pairs, threads=threads), expected_per_pose)
+
+    def test_single_pose(self):
+        world, transforms, pairs = self.world_and_poses(20)
+        for i in range(20):
+            single = {k: v[i] for k, v in transforms.items()}
+            expected = world.check(single, pairs)
+            for threads in THREAD_VALUES:
+                np.testing.assert_array_equal(world.check(single, pairs, threads=threads), expected)
+
+    def test_validation_errors_identical(self):
+        world, transforms, pairs = self.world_and_poses(2_000)
+        bad_transforms = {k: v.copy() for k, v in transforms.items()}
+        # Several bad poses: the message must name the lowest one for every thread count.
+        bad_transforms["b"][[1_900, 700, 1_200]] = np.diag([2.0, 2.0, 2.0, 1.0])
+        bad_inputs = [
+            (bad_transforms, pairs),
+            ({k: v for k, v in transforms.items() if k != "c"}, pairs),
+            ({**transforms, "c": transforms["c"][:5]}, pairs),
+            ({**transforms, "c": "not an array"}, pairs),
+            (transforms, [("a", "nope", 0.0)]),
+            (transforms, [("a", "b")]),
+        ]
+        for method in ("check", "check_any", "check_first", "check_per_pose"):
+            fn = getattr(world, method)
+            for tfs, prs in bad_inputs:
+                with pytest.raises(Exception) as expected:
+                    fn(tfs, prs)
+                for threads in THREAD_VALUES:
+                    with pytest.raises(expected.type) as actual:
+                        fn(tfs, prs, threads=threads)
+                    assert str(actual.value) == str(expected.value)
+        with pytest.raises(ValueError, match=r"Transform for 'b' at index 700: "):
+            world.check(bad_transforms, pairs, threads=2)
+
+    @pytest.mark.parametrize("threads", [0, -1, -64])
+    @pytest.mark.parametrize("method", ["check", "check_any", "check_first", "check_per_pose"])
+    def test_threads_below_one_raises(self, method, threads):
+        world, transforms, pairs = self.world_and_poses(10)
+        with pytest.raises(ValueError, match=rf"threads must be a positive integer or None, got {threads}"):
+            getattr(world, method)(transforms, pairs, threads=threads)
+
+    @pytest.mark.parametrize("threads", [2.0, "2"])
+    def test_threads_must_be_int(self, threads):
+        world, transforms, pairs = self.world_and_poses(10)
+        with pytest.raises(TypeError):
+            world.check(transforms, pairs, threads=threads)
+
+    def test_threads_is_keyword_only(self):
+        world, transforms, pairs = self.world_and_poses(10)
+        with pytest.raises(TypeError):
+            world._internal.check(transforms, pairs, 2)  # pyright: ignore[reportCallIssue]
+
+    @pytest.mark.parametrize("threads", [1, 2, 3])
+    def test_cap_is_honoured(self, threads):
+        # The probe runs 1 ms jobs through the same pool selection as the queries.
+        used = pp._internal._probe_workers(200, threads)
+        assert 1 <= used <= threads
+        if threads == 1:
+            assert used == 1
+
+    def test_probe_rejects_threads_below_one(self):
+        with pytest.raises(ValueError):
+            pp._internal._probe_workers(10, 0)
+
+
+class TestSinglePoseShapes:
+    """Result shapes for a bare (4, 4) pose versus a (1, 4, 4) batch."""
+
+    @staticmethod
+    def world_and_poses():
+        return TestCheckPerPose.random_world_and_poses(1, seed=2)
+
+    def test_check_per_pose_is_always_1d(self):
+        world, transforms, pairs = self.world_and_poses()
+        bare = {k: v[0] for k, v in transforms.items()}
+        for tfs in (bare, transforms):
+            result = world.check_per_pose(tfs, pairs)
+            assert isinstance(result, np.ndarray)
+            assert result.shape == (1,)
+
+    def test_check_drops_batch_axis_for_one_pose(self):
+        world, transforms, pairs = self.world_and_poses()
+        bare = {k: v[0] for k, v in transforms.items()}
+        # Pins today's behaviour: N == 1 gives (n_pairs,), unlike (N, n_pairs) for N > 1.
+        assert world.check(transforms, pairs).shape == (len(pairs),)
+        assert world.check(bare, pairs).shape == (len(pairs),)
+
+    def test_check_first_and_any_on_one_pose_batch(self):
+        world, transforms, _ = self.world_and_poses()
+        pairs = [("a", "floor", 0.0)]
+        for z, hit in ((0.0, True), (3.0, False)):
+            transforms["a"][0, :3, 3] = [0.0, 0.0, z]
+            first = world.check_first(transforms, pairs)
+            any_idx = world.check_any(transforms, pairs)
+            if hit:
+                assert first is not None and first[0] == 0
+                np.testing.assert_array_equal(first[1], [True])
+                assert any_idx == 0
+            else:
+                assert first is None and any_idx is None
+
+
 class TestSingleObjectLocalTransform:
     """A one-object group must honour that object's local transform (#1).
 
