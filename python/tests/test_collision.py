@@ -182,6 +182,19 @@ class TestCollisionWorld:
         assert result[:50, 0].sum() == 0  # No collisions in first half
         assert result[50:, 0].sum() == 50  # All collisions in second half
 
+    @pytest.mark.parametrize(
+        ("n", "n_pairs", "shape"),
+        [(0, 0, (0, 0)), (0, 2, (0, 2)), (1, 0, (0,)), (1, 2, (2,)), (3, 0, (3, 0)), (3, 2, (3, 2))],
+    )
+    def test_batch_result_shapes(self, simple_world, n, n_pairs, shape):
+        """Empty batches and empty pair lists keep the shapes v0.0.4 returned."""
+        transforms = np.tile(np.eye(4), (n, 1, 1)).astype(np.float64)
+        transforms[:, 2, 3] = -0.4
+        result = simple_world.check({"robot": transforms}, [("robot", "floor", 0.0)] * n_pairs)
+        assert result.shape == shape
+        assert result.dtype == np.bool_
+        assert result.all()
+
 
 class TestHelpers:
     """Test helper functions."""
