@@ -197,11 +197,26 @@ class CollisionWorld:
         pairs: PairList,
     ) -> int | None:
         """
-        Check for any collision, returning early on first hit.
+        Check for any collision, returning early on the first hit any thread finds.
+
+        The returned index is a colliding pose, not necessarily the lowest one.
 
         :param transforms: Dict mapping dynamic group name to transform array.
         :param pairs: List of (group_a, group_b, min_distance) tuples to check.
-        :return: Index of first pose with collision, or None if no collisions.
+        :return: Index of a pose with collision, or None if no collisions.
+        """
+
+    def check_first(
+        self,
+        transforms: TransformDict,
+        pairs: PairList,
+    ) -> tuple[int, npt.NDArray[np.bool_]] | None:
+        """
+        Find the lowest-index colliding pose, deterministic regardless of thread count.
+
+        :param transforms: Dict mapping dynamic group name to transform array.
+        :param pairs: List of (group_a, group_b, min_distance) tuples to check.
+        :return: (index, (n_pairs,) bool array for that pose), or None if no collisions.
         """
 
     def to_bytes(self) -> bytes:
@@ -263,7 +278,7 @@ def set_num_threads(n: int) -> bool:
     """
     Set the number of threads for parallel operations.
 
-    Must be called BEFORE the first parallel operation (check/check_any).
+    Must be called BEFORE the first parallel operation (check/check_any/check_first).
     Once the thread pool is initialized, this function has no effect.
 
     :param n: Number of threads to use.
