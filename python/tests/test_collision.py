@@ -182,6 +182,19 @@ class TestCollisionWorld:
         assert result[:50, 0].sum() == 0  # No collisions in first half
         assert result[50:, 0].sum() == 50  # All collisions in second half
 
+    @pytest.mark.parametrize(
+        ("n", "n_pairs", "shape"),
+        [(0, 0, (0, 0)), (0, 2, (0, 2)), (1, 0, (0,)), (1, 2, (2,)), (3, 0, (3, 0)), (3, 2, (3, 2))],
+    )
+    def test_batch_result_shapes(self, simple_world, n, n_pairs, shape):
+        """Empty batches and empty pair lists keep the shapes v0.0.4 returned."""
+        transforms = np.tile(np.eye(4), (n, 1, 1)).astype(np.float64)
+        transforms[:, 2, 3] = -0.4
+        result = simple_world.check({"robot": transforms}, [("robot", "floor", 0.0)] * n_pairs)
+        assert result.shape == shape
+        assert result.dtype == np.bool_
+        assert result.all()
+
 
 class TestHelpers:
     """Test helper functions."""
@@ -451,6 +464,110 @@ class TestCheckFirst:
                 world.check(transforms, [("a", "b", 0.0)])
             with pytest.raises(ValueError) as actual:
                 world.check_first(transforms, [("a", "b", 0.0)])
+            assert str(actual.value) == str(expected.value)
+
+
+class TestCheckPerPose:
+    """First colliding pair per pose, agreeing with check() (#23)."""
+
+    @staticmethod
+    def random_world_and_poses(n: int, seed: int = 0):
+        from scipy.spatial.transform import Rotation
+
+        rng = np.random.default_rng(seed)
+        offset = np.eye(4)
+        offset[:3, 3] = [0.1, 0.0, 0.05]
+        groups = [
+            pp.CollisionGroup("a", [pp.Box([0.2, 0.1, 0.1])]),
+            pp.CollisionGroup("b", [pp.Sphere(0.15), pp.CollisionObject(pp.Box([0.1, 0.1, 0.1]), offset)]),
+            pp.CollisionGroup("c", [pp.Capsule(0.1, 0.05)]),
+            pp.CollisionGroup("d", [pp.Cylinder(0.1, 0.1)]),
+            pp.CollisionGroup("floor", [pp.Box([5, 5, 0.1])], static=True, transform=np.eye(4)),
+        ]
+        world = pp.CollisionWorld(groups)
+        transforms = {}
+        for name in world.dynamic_groups:
+            tfs = np.tile(np.eye(4), (n, 1, 1))
+            if n:
+                # SciPy 1.15 rejects an empty batch
+                tfs[:, :3, :3] = Rotation.random(n, rng=rng).as_matrix()
+            tfs[:, :3, 3] = rng.uniform(-0.6, 0.6, size=(n, 3))
+            transforms[name] = tfs
+        pairs = [
+            ("a", "b", 0.0),
+            ("a", "c", 0.05),
+            ("b", "c", 0.0),
+            ("c", "d", 0.0),
+            ("a", "floor", 0.0),
+            ("d", "floor", 0.1),
+            ("b", "d", 0.02),
+        ]
+        return world, transforms, pairs
+
+    def test_agrees_with_check(self):
+        world, transforms, pairs = self.random_world_and_poses(5_000)
+        full = world.check(transforms, pairs)
+        expected = np.where(full.any(axis=1), full.argmax(axis=1), -1)
+        # The data must exercise every pair index and poses without any hit.
+        assert set(expected) == set(range(-1, len(pairs)))
+
+        result = world.check_per_pose(transforms, pairs)
+        assert result.dtype == np.int64
+        assert result.shape == (len(full),)
+        np.testing.assert_array_equal(result >= 0, full.any(axis=1))
+        np.testing.assert_array_equal(result, expected)
+
+    def test_single_pose_is_one_row(self):
+        world, transforms, pairs = self.random_world_and_poses(50, seed=1)
+        for i in range(50):
+            single = {k: v[i] for k, v in transforms.items()}
+            full = world.check(single, pairs)
+            result = world.check_per_pose(single, pairs)
+            assert result.shape == (1,)
+            assert result.dtype == np.int64
+            assert result[0] == (full.argmax() if full.any() else -1)
+
+    @pytest.mark.parametrize("n", [0, 1, 7])
+    def test_no_pairs(self, n):
+        world, transforms, _ = self.random_world_and_poses(n)
+        result = world.check_per_pose(transforms, [])
+        assert result.shape == (n,)
+        assert result.dtype == np.int64
+        np.testing.assert_array_equal(result, -1)
+
+    def test_empty_batch(self):
+        world, transforms, pairs = self.random_world_and_poses(0)
+        result = world.check_per_pose(transforms, pairs)
+        assert result.shape == (0,)
+        assert result.dtype == np.int64
+
+    def test_invalid_transform_error_matches_check(self):
+        world, transforms, pairs = self.random_world_and_poses(1_000)
+        transforms["b"][[800, 300]] = np.diag([2.0, 2.0, 2.0, 1.0])
+        with pytest.raises(ValueError) as expected:
+            world.check(transforms, pairs)
+        with pytest.raises(ValueError) as actual:
+            world.check_per_pose(transforms, pairs)
+        assert str(actual.value) == str(expected.value)
+        assert "Transform for 'b' at index 300: " in str(actual.value)
+
+    def test_input_errors_match_check(self):
+        world, transforms, pairs = self.random_world_and_poses(10)
+        bad_inputs = [
+            ({k: v for k, v in transforms.items() if k != "c"}, pairs),
+            ({**transforms, "c": transforms["c"][:5]}, pairs),
+            ({**transforms, "c": transforms["c"][0]}, pairs),
+            ({**transforms, "c": "not an array"}, pairs),
+            ({**transforms, "c": np.zeros((10, 3, 4))}, pairs),
+            (transforms, [("a", "nope", 0.0)]),
+            (transforms, [("a", "b")]),
+            (transforms, [("a", "b", "x")]),
+        ]
+        for tfs, prs in bad_inputs:
+            with pytest.raises(Exception) as expected:
+                world.check(tfs, prs)
+            with pytest.raises(expected.type) as actual:
+                world.check_per_pose(tfs, prs)
             assert str(actual.value) == str(expected.value)
 
 

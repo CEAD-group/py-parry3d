@@ -156,6 +156,11 @@ collisions = world.check(transforms, pairs)
 # Check if any collision per pose
 any_collision = collisions.any(axis=1)  # (N,) bool array
 
+# Same answer without building the (N, n_pairs) matrix: check_per_pose gives
+# the first colliding pair per pose (-1 where none), stopping at that pair
+first_pair = world.check_per_pose(transforms, pairs)  # (N,) int64 array
+any_collision = first_pair >= 0
+
 # Count poses with collisions
 n_colliding_poses = any_collision.sum()
 

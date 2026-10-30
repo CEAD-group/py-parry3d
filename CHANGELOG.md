@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deterministic regardless of thread count: it uses Rayon's `find_first`, which
   skips poses above the lowest hit found so far, and computes the per-pair
   result only for the winning pose.
+- **`CollisionWorld.check_per_pose(transforms, pairs)`** returns an `(N,)`
+  int64 array with, per pose, the index into `pairs` of the first colliding
+  pair, or -1 if none collides. `result >= 0` is the per-pose bool, equal to
+  `check(...).any(axis=1)`, without building the `(N, n_pairs)` matrix. Each
+  pose stops at its first colliding pair. Same inputs and validation as
+  `check`; a single `(4, 4)` pose counts as `N = 1`. (#23)
 
 ### Changed
 
@@ -24,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are unchanged. Group names are resolved to indices once per call, static
   group poses are composed once per call instead of once per pose, and the
   per-pose pose buffer is reused instead of allocated for every pose.
+- **Faster batched calls** (#23). The per-matrix error context is formatted
+  only for a matrix that fails validation, batch transforms are converted and
+  validated in parallel, and the per-pose work of `check`, `check_any` and
+  `check_first` runs with the GIL released. `check` fills one flat result
+  buffer instead of one vector per pose. Results and error messages are
+  unchanged, including which index is reported when several matrices are
+  invalid (the lowest).
 
 ### Documentation
 

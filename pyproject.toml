@@ -23,7 +23,7 @@ dev = [
 ]
 test = [
     "pytest",
-    "scipy>=1.14",
+    "scipy>=1.15",
     "trimesh",
 ]
 

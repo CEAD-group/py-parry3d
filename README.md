@@ -82,7 +82,7 @@ world = pp.CollisionWorld([robot, env])
 ### Transforms
 
 All 4x4 transforms - a `CollisionObject` local offset, a static group's
-transform, and every pose passed to `check`/`check_any`/`check_first` - must be **rigid**:
+transform, and every pose passed to `check`/`check_any`/`check_first`/`check_per_pose` - must be **rigid**:
 
 - the upper-left 3x3 block is a proper rotation (orthonormal, determinant +1);
   no scale, no shear, no reflection;
@@ -105,6 +105,10 @@ idx = world.check_any(transforms, pairs)  # int or None
 
 # Lowest colliding pose plus which pairs collide there (deterministic)
 first = world.check_first(transforms, pairs)  # (int, (n_pairs,) bool array) or None
+
+# First colliding pair per pose, -1 where none (each pose stops at its first hit)
+first_pair = world.check_per_pose(transforms, pairs)  # (N,) int64 array
+hit = first_pair >= 0  # (N,) bool, same as check(...).any(axis=1)
 ```
 
 ### Pair Helpers

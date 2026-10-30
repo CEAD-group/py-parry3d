@@ -527,6 +527,32 @@ fn validate_rigid_transform(m: &[[f64; 4]; 4], context: &str) -> PyResult<()> {
     Ok(())
 }
 
+/// Convert the row-major `(N, 4, 4)` data of group `name` into matrices,
+/// validating every one, in parallel.
+///
+/// On failure the error names the group and the lowest invalid index, exactly
+/// as a serial scan would. The context string costs about 200 ns per matrix to
+/// format, more than the check itself, so it is only built for the matrix that
+/// fails.
+fn batch_transforms(slice: &[f64], name: &str) -> PyResult<Vec<[[f64; 4]; 4]>> {
+    let tfs: Vec<[[f64; 4]; 4]> = slice
+        .par_chunks_exact(16)
+        .map(|c| [
+            [c[0], c[1], c[2], c[3]],
+            [c[4], c[5], c[6], c[7]],
+            [c[8], c[9], c[10], c[11]],
+            [c[12], c[13], c[14], c[15]],
+        ])
+        .collect();
+    if let Some(i) = tfs
+        .par_iter()
+        .position_first(|m| validate_rigid_transform(m, "").is_err())
+    {
+        validate_rigid_transform(&tfs[i], &format!("Transform for '{}' at index {}: ", name, i))?;
+    }
+    Ok(tfs)
+}
+
 fn extract_transform_4x4(arr: &PyReadonlyArray2<f64>) -> PyResult<[[f64; 4]; 4]> {
     let shape = arr.shape();
     if shape != [4, 4] {
@@ -822,26 +848,29 @@ impl CollisionWorld {
         let n = query.n;
         let n_pairs = query.pairs.len();
 
-        // Perform collision checking in parallel
-        let results: Vec<Vec<bool>> = (0..n)
-            .into_par_iter()
-            .map_init(
-                || query.pose_scratch(),
-                |poses, pose_idx| {
-                    query.fill_poses(pose_idx, poses);
-                    query.pair_results(poses)
-                },
-            )
-            .collect();
+        // Perform collision checking in parallel without the GIL, filling
+        // row `pose_idx` of one flat (n, n_pairs) buffer.
+        let mut flat = vec![false; n * n_pairs];
+        // par_chunks_mut panics on a chunk size of 0; with no pairs there is nothing to fill.
+        if n_pairs > 0 {
+            py.detach(|| {
+                flat.par_chunks_mut(n_pairs).enumerate().for_each_init(
+                    || query.pose_scratch(),
+                    |poses, (pose_idx, row)| {
+                        query.fill_poses(pose_idx, poses);
+                        query.write_pair_results(poses, row);
+                    },
+                )
+            });
+        }
 
         // Convert to numpy array
         if n == 1 {
             // Return (n_pairs,) array
-            let result = results.into_iter().next().unwrap_or_default().into_pyarray(py);
+            let result = flat.into_pyarray(py);
             Ok(result.into_any().unbind())
         } else {
-            // Return (N, n_pairs) array - flatten and reshape
-            let flat: Vec<bool> = results.into_iter().flatten().collect();
+            // Return (N, n_pairs) array
             let arr = flat.into_pyarray(py);
             let reshaped = arr.reshape([n, n_pairs])?;
             Ok(reshaped.into_any().unbind())
@@ -854,15 +883,17 @@ impl CollisionWorld {
     /// the lowest), or None
     fn check_any<'py>(
         &self,
-        _py: Python<'py>,
+        py: Python<'py>,
         transforms: &Bound<'py, PyDict>,
         pairs: &Bound<'py, PyList>,
     ) -> PyResult<Option<usize>> {
         let query = self.prepare_query(transforms, pairs)?;
-        Ok(query
-            .pose_hits()
-            .find_any(|&(_, hit)| hit)
-            .map(|(pose_idx, _)| pose_idx))
+        Ok(py.detach(|| {
+            query
+                .pose_hits()
+                .find_any(|&(_, hit)| hit)
+                .map(|(pose_idx, _)| pose_idx)
+        }))
     }
 
     /// Find the lowest-index colliding pose and its per-pair results.
@@ -880,16 +911,48 @@ impl CollisionWorld {
     ) -> PyResult<Option<(usize, Bound<'py, PyArray1<bool>>)>> {
         let query = self.prepare_query(transforms, pairs)?;
         // find_first returns the lowest matching index, unlike find_any.
-        let first = query
-            .pose_hits()
-            .find_first(|&(_, hit)| hit)
-            .map(|(pose_idx, _)| pose_idx);
+        let first = py.detach(|| {
+            query
+                .pose_hits()
+                .find_first(|&(_, hit)| hit)
+                .map(|(pose_idx, _)| pose_idx)
+        });
 
         Ok(first.map(|pose_idx| {
             let mut poses = query.pose_scratch();
             query.fill_poses(pose_idx, &mut poses);
             (pose_idx, query.pair_results(&poses).into_pyarray(py))
         }))
+    }
+
+    /// Index of the first colliding pair at every pose.
+    ///
+    /// Takes the same arguments as `check`. Each pose stops at its first
+    /// colliding pair, and the (N, n_pairs) matrix is never built. A single
+    /// (4, 4) pose counts as N = 1.
+    ///
+    /// Returns: (N,) int64 array - per pose, the index into `pairs` of the
+    /// first colliding pair, or -1 if none collides
+    fn check_per_pose<'py>(
+        &self,
+        py: Python<'py>,
+        transforms: &Bound<'py, PyDict>,
+        pairs: &Bound<'py, PyList>,
+    ) -> PyResult<Bound<'py, PyArray1<i64>>> {
+        let query = self.prepare_query(transforms, pairs)?;
+        let mut first = vec![-1i64; query.n];
+        py.detach(|| {
+            first.par_iter_mut().enumerate().for_each_init(
+                || query.pose_scratch(),
+                |poses, (pose_idx, out)| {
+                    query.fill_poses(pose_idx, poses);
+                    if let Some(pair_idx) = query.first_colliding_pair(poses) {
+                        *out = pair_idx as i64;
+                    }
+                },
+            )
+        });
+        Ok(first.into_pyarray(py))
     }
 
     /// Serialize to bytes.
@@ -947,8 +1010,9 @@ impl CollisionWorld {
 
 // Not #[pymethods]: these helpers must not be callable from Python.
 impl CollisionWorld {
-    /// Parse and validate the arguments shared by `check`, `check_any` and
-    /// `check_first`, resolving every group name to an index.
+    /// Parse and validate the arguments shared by `check`, `check_any`,
+    /// `check_first` and `check_per_pose`, resolving every group name to an
+    /// index.
     fn prepare_query(
         &self,
         transforms: &Bound<'_, PyDict>,
@@ -1037,19 +1101,7 @@ impl CollisionWorld {
                 }
 
                 let slice = arr4.as_slice()?;
-                let mut tfs = Vec::with_capacity(n);
-                for i in 0..n {
-                    let base = i * 16;
-                    let m = [
-                        [slice[base], slice[base+1], slice[base+2], slice[base+3]],
-                        [slice[base+4], slice[base+5], slice[base+6], slice[base+7]],
-                        [slice[base+8], slice[base+9], slice[base+10], slice[base+11]],
-                        [slice[base+12], slice[base+13], slice[base+14], slice[base+15]],
-                    ];
-                    validate_rigid_transform(&m, &format!("Transform for '{}' at index {}: ", dynamic_name, i))?;
-                    tfs.push(m);
-                }
-                tfs
+                transforms.py().detach(|| batch_transforms(slice, dynamic_name))?
             } else if let Ok(arr2) = arr_any.extract::<PyReadonlyArray2<f64>>() {
                 // (4, 4) single
                 let tf = extract_transform_4x4(&arr2)?;
@@ -1129,9 +1181,21 @@ impl PreparedQuery<'_> {
         self.pairs.iter().any(|&pair| self.pair_collides(poses, pair))
     }
 
+    /// Index of the first pair that collides, stopping there.
+    fn first_colliding_pair(&self, poses: &[Option<Pose3>]) -> Option<usize> {
+        self.pairs.iter().position(|&pair| self.pair_collides(poses, pair))
+    }
+
     /// One bool per pair, in `pairs` order.
     fn pair_results(&self, poses: &[Option<Pose3>]) -> Vec<bool> {
         self.pairs.iter().map(|&pair| self.pair_collides(poses, pair)).collect()
+    }
+
+    /// `pair_results` written into `row`, one bool per pair, without allocating.
+    fn write_pair_results(&self, poses: &[Option<Pose3>], row: &mut [bool]) {
+        for (out, &pair) in row.iter_mut().zip(&self.pairs) {
+            *out = self.pair_collides(poses, pair);
+        }
     }
 
     /// `(pose_idx, any pair collides)` for every pose, reusing one pose buffer per job.

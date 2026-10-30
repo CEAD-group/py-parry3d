@@ -241,3 +241,62 @@ class TestAcceptance:
         near = rotation_z(0.3)
         near[0, 3] = 0.2
         assert world.check({"robot": near}, [("robot", "obstacle", 0.0)])[0]
+
+
+def _batch_with_invalid(n: int, invalid: dict[int, np.ndarray]) -> np.ndarray:
+    batch = np.tile(np.eye(4), (n, 1, 1)).astype(np.float64)
+    for i, m in invalid.items():
+        batch[i] = m
+    return batch
+
+
+# Messages as produced by the serial validation loop of v0.0.4; #23 must not change them.
+EXACT_MESSAGES = {
+    "uniform_scale": "Transform for 'robot' at index {i}: Transform rotation block must be orthonormal "
+    "(no scale or shear): (R^T R)[0][0] = 4, expected 1 (tolerance 1e-6)",
+    "bad_bottom_row": "Transform for 'robot' at index {i}: Transform must have bottom row [0, 0, 0, 1], "
+    "but got [9, 9, 9, 7]",
+    "reflection": "Transform for 'robot' at index {i}: Transform rotation block must have determinant +1, "
+    "but got -1 (tolerance 1e-6); a determinant of -1 is a reflection",
+    "nan_translation": "Transform for 'robot' at index {i}: Transform must be finite, but element [0][3] is NaN",
+}
+
+
+class TestBatchErrorReporting:
+    """Batch validation reports the same error, for the same index, however it is computed (#23)."""
+
+    @pytest.mark.parametrize("method", ["check", "check_any", "check_first"])
+    @pytest.mark.parametrize("name", list(EXACT_MESSAGES))
+    def test_message_text_is_unchanged(self, method, name):
+        world = make_world()
+        batch = _batch_with_invalid(50, {17: INVALID[name][0]()})
+        with pytest.raises(ValueError) as excinfo:
+            getattr(world, method)({"robot": batch}, [("robot", "obstacle", 0.0)])
+        assert str(excinfo.value) == EXACT_MESSAGES[name].format(i=17)
+
+    @pytest.mark.parametrize("method", ["check", "check_any", "check_first"])
+    def test_lowest_invalid_index_is_reported(self, method):
+        """With several bad poses the lowest index wins, as in a serial scan, even across parallel chunks."""
+        world = make_world()
+        n = 100_000
+        invalid = {
+            n - 1: INVALID["nan_translation"][0](),
+            70_001: INVALID["reflection"][0](),
+            40_003: INVALID["bad_bottom_row"][0](),
+            1_234: INVALID["uniform_scale"][0](),
+        }
+        batch = _batch_with_invalid(n, invalid)
+        with pytest.raises(ValueError) as excinfo:
+            getattr(world, method)({"robot": batch}, [("robot", "obstacle", 0.0)])
+        assert str(excinfo.value) == EXACT_MESSAGES["uniform_scale"].format(i=1_234)
+
+    def test_earlier_group_is_reported_first(self):
+        """Groups are validated in world order, so an invalid pose in the first group wins."""
+        g_a = pp.CollisionGroup("robot", [pp.Box([0.5, 0.5, 0.5])])
+        g_b = pp.CollisionGroup("arm", [pp.Box([0.5, 0.5, 0.5])])
+        world = pp.CollisionWorld([g_a, g_b])
+        robot = _batch_with_invalid(1_000, {900: INVALID["uniform_scale"][0]()})
+        arm = _batch_with_invalid(1_000, {3: INVALID["nan_translation"][0]()})
+        with pytest.raises(ValueError) as excinfo:
+            world.check({"robot": robot, "arm": arm}, [("robot", "arm", 0.0)])
+        assert str(excinfo.value) == EXACT_MESSAGES["uniform_scale"].format(i=900)
