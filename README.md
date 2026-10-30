@@ -123,8 +123,34 @@ pairs = pp.pairs_vs(["l1", "l2"], "obstacle", min_distance=0.05)
 
 ### Threading
 
+The four batched `CollisionWorld` queries (`check`, `check_any`, `check_first`,
+`check_per_pose`) are the only methods that run in parallel, so they are the
+only ones that take `threads`. Two controls set how many threads they use:
+
+- `set_num_threads(n)` sets the size of the process-wide default pool (default:
+  all cores). It only works before the first parallel call and returns `False`
+  after that.
+- `threads=` (keyword-only) caps a single call and overrides the default for
+  that call. `None` (the default) uses the process-wide pool, `1` runs serially
+  in the calling thread without any pool, and `n >= 2` runs on a pool of `n`
+  threads. `threads < 1` raises `ValueError`. The cap covers both transform
+  validation and the query loop, and results do not depend on it, apart from
+  which colliding pose `check_any` reports.
+
+Pools for `threads >= 2` are built on first use and cached per thread count
+for the life of the process, so their idle threads stay alive (asleep) between
+calls, and each distinct value keeps its own pool.
+
 ```python
-pp.set_num_threads(8)  # Default: all cores
+# Process-wide default, only before the first query
+pp.set_num_threads(8)
+
+# On a shared server, keep this call to 2 cores
+hits = world.check(transforms, pairs, threads=2)
+first_pair = world.check_per_pose(transforms, pairs, threads=2)
+
+# Serial in the calling thread, e.g. when you parallelise across processes yourself
+hits = world.check(transforms, pairs, threads=1)
 ```
 
 ### Serialization

@@ -225,6 +225,8 @@ class CollisionWorld:
         self,
         transforms: TransformDict,
         pairs: PairList,
+        *,
+        threads: int | None = None,
     ) -> npt.NDArray[np.bool_]:
         """
         Check collisions for given transforms and pairs.
@@ -233,31 +235,48 @@ class CollisionWorld:
                           Single pose: (4, 4) array per group.
                           Batch: (N, 4, 4) array per group.
         :param pairs: List of (group_a, group_b, min_distance) tuples.
+        :param threads: Keyword-only cap on the worker threads for this call, covering
+                        both transform validation and the query loop. None (default)
+                        uses the process-wide pool (see :func:`set_num_threads`); 1 runs
+                        serially in the calling thread; n >= 2 uses a cached pool of n
+                        threads. Values below 1 raise ValueError. Results do not depend
+                        on it, apart from which colliding pose ``check_any`` reports.
         :return: Boolean array. Single pose: (n_pairs,). Batch: (N, n_pairs).
         """
-        return self._internal.check(transforms, pairs)
+        return self._internal.check(transforms, pairs, threads=threads)
 
     def check_any(
         self,
         transforms: TransformDict,
         pairs: PairList,
+        *,
+        threads: int | None = None,
     ) -> int | None:
         """
         Check for any collision, returning early on the first hit any thread finds.
 
         The returned index is a colliding pose, not necessarily the lowest one,
-        and may differ between runs. Use :meth:`check_first` for the lowest.
+        and may differ between runs and between ``threads`` values. Use
+        :meth:`check_first` for the lowest.
 
         :param transforms: Dict mapping dynamic group name to transform array.
         :param pairs: List of (group_a, group_b, min_distance) tuples.
+        :param threads: Keyword-only cap on the worker threads for this call, covering
+                        both transform validation and the query loop. None (default)
+                        uses the process-wide pool (see :func:`set_num_threads`); 1 runs
+                        serially in the calling thread; n >= 2 uses a cached pool of n
+                        threads. Values below 1 raise ValueError. Results do not depend
+                        on it, apart from which colliding pose ``check_any`` reports.
         :return: Index of a pose with collision, or None if no collisions.
         """
-        return self._internal.check_any(transforms, pairs)
+        return self._internal.check_any(transforms, pairs, threads=threads)
 
     def check_first(
         self,
         transforms: TransformDict,
         pairs: PairList,
+        *,
+        threads: int | None = None,
     ) -> tuple[int, npt.NDArray[np.bool_]] | None:
         """
         Find the lowest-index colliding pose, returning early once it is known.
@@ -268,16 +287,24 @@ class CollisionWorld:
                           Single pose: (4, 4) array per group.
                           Batch: (N, 4, 4) array per group.
         :param pairs: List of (group_a, group_b, min_distance) tuples.
+        :param threads: Keyword-only cap on the worker threads for this call, covering
+                        both transform validation and the query loop. None (default)
+                        uses the process-wide pool (see :func:`set_num_threads`); 1 runs
+                        serially in the calling thread; n >= 2 uses a cached pool of n
+                        threads. Values below 1 raise ValueError. Results do not depend
+                        on it, apart from which colliding pose ``check_any`` reports.
         :return: ``(index, collisions)`` where ``index`` is the first pose with
                  any collision and ``collisions`` is the (n_pairs,) bool array
                  for that pose, ordered like ``pairs``. None if no collisions.
         """
-        return self._internal.check_first(transforms, pairs)
+        return self._internal.check_first(transforms, pairs, threads=threads)
 
     def check_per_pose(
         self,
         transforms: TransformDict,
         pairs: PairList,
+        *,
+        threads: int | None = None,
     ) -> npt.NDArray[np.int64]:
         """
         Find the first colliding pair at every pose.
@@ -290,10 +317,17 @@ class CollisionWorld:
                           Single pose: (4, 4) array per group, counted as N = 1.
                           Batch: (N, 4, 4) array per group.
         :param pairs: List of (group_a, group_b, min_distance) tuples.
+        :param threads: Keyword-only cap on the worker threads for this call, covering
+                        both transform validation and the query loop. None (default)
+                        uses the process-wide pool (see :func:`set_num_threads`); 1 runs
+                        serially in the calling thread; n >= 2 uses a cached pool of n
+                        threads. Values below 1 raise ValueError. Results do not depend
+                        on it, apart from which colliding pose ``check_any`` reports.
         :return: (N,) int64 array: per pose, the index into ``pairs`` of the
                  first colliding pair, or -1 if no pair collides.
+                 Always 1-D: a single (4, 4) pose and a (1, 4, 4) batch both give shape (1,).
         """
-        return self._internal.check_per_pose(transforms, pairs)
+        return self._internal.check_per_pose(transforms, pairs, threads=threads)
 
     def to_bytes(self) -> bytes:
         """Serialize the world to bytes (includes pre-built BVHs)."""

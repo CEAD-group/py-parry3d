@@ -5,13 +5,14 @@ use parry3d_f64::shape::{
     Cylinder as ParryCylinder, SharedShape, TriMesh as ParryTriMesh,
 };
 use parry3d_f64::query;
-use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use rayon::prelude::*;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 
 // ============================================================================
 // Shape Types
@@ -534,9 +535,10 @@ fn validate_rigid_transform(m: &[[f64; 4]; 4], context: &str) -> PyResult<()> {
 /// as a serial scan would. The context string costs about 200 ns per matrix to
 /// format, more than the check itself, so it is only built for the matrix that
 /// fails.
-fn batch_transforms(slice: &[f64], name: &str) -> PyResult<Vec<[[f64; 4]; 4]>> {
+fn batch_transforms(slice: &[f64], name: &str, min_len: usize) -> PyResult<Vec<[[f64; 4]; 4]>> {
     let tfs: Vec<[[f64; 4]; 4]> = slice
         .par_chunks_exact(16)
+        .with_min_len(min_len)
         .map(|c| [
             [c[0], c[1], c[2], c[3]],
             [c[4], c[5], c[6], c[7]],
@@ -546,6 +548,7 @@ fn batch_transforms(slice: &[f64], name: &str) -> PyResult<Vec<[[f64; 4]; 4]>> {
         .collect();
     if let Some(i) = tfs
         .par_iter()
+        .with_min_len(min_len)
         .position_first(|m| validate_rigid_transform(m, "").is_err())
     {
         validate_rigid_transform(&tfs[i], &format!("Transform for '{}' at index {}: ", name, i))?;
@@ -836,15 +839,20 @@ impl CollisionWorld {
     ///
     /// transforms: dict mapping group name to (N, 4, 4) or (4, 4) array
     /// pairs: list of (group_name, group_name, min_distance) tuples
+    /// threads: keyword-only worker cap for this call; None uses the global
+    /// pool, 1 runs in the calling thread, below 1 raises ValueError
     ///
     /// Returns: (N, n_pairs) or (n_pairs,) bool array
+    #[pyo3(signature = (transforms, pairs, *, threads = None))]
     fn check<'py>(
         &self,
         py: Python<'py>,
         transforms: &Bound<'py, PyDict>,
         pairs: &Bound<'py, PyList>,
+        threads: Option<isize>,
     ) -> PyResult<Py<PyAny>> {
-        let query = self.prepare_query(transforms, pairs)?;
+        let workers = Workers::new(threads)?;
+        let query = self.prepare_query(transforms, pairs, &workers)?;
         let n = query.n;
         let n_pairs = query.pairs.len();
 
@@ -853,15 +861,15 @@ impl CollisionWorld {
         let mut flat = vec![false; n * n_pairs];
         // par_chunks_mut panics on a chunk size of 0; with no pairs there is nothing to fill.
         if n_pairs > 0 {
-            py.detach(|| {
-                flat.par_chunks_mut(n_pairs).enumerate().for_each_init(
+            py.detach(|| workers.install(n, || {
+                flat.par_chunks_mut(n_pairs).enumerate().with_min_len(query.min_len).for_each_init(
                     || query.pose_scratch(),
                     |poses, (pose_idx, row)| {
                         query.fill_poses(pose_idx, poses);
                         query.write_pair_results(poses, row);
                     },
                 )
-            });
+            }));
         }
 
         // Convert to numpy array
@@ -879,21 +887,26 @@ impl CollisionWorld {
 
     /// Check for any collision, returning early on the first hit any thread finds.
     ///
+    /// Takes the same arguments as `check`.
+    ///
     /// Returns: Optional[int] - index of a pose with collision (not necessarily
     /// the lowest), or None
+    #[pyo3(signature = (transforms, pairs, *, threads = None))]
     fn check_any<'py>(
         &self,
         py: Python<'py>,
         transforms: &Bound<'py, PyDict>,
         pairs: &Bound<'py, PyList>,
+        threads: Option<isize>,
     ) -> PyResult<Option<usize>> {
-        let query = self.prepare_query(transforms, pairs)?;
-        Ok(py.detach(|| {
+        let workers = Workers::new(threads)?;
+        let query = self.prepare_query(transforms, pairs, &workers)?;
+        Ok(py.detach(|| workers.install(query.n, || {
             query
                 .pose_hits()
                 .find_any(|&(_, hit)| hit)
                 .map(|(pose_idx, _)| pose_idx)
-        }))
+        })))
     }
 
     /// Find the lowest-index colliding pose and its per-pair results.
@@ -903,20 +916,23 @@ impl CollisionWorld {
     ///
     /// Returns: Optional[tuple[int, (n_pairs,) bool array]] - the first pose
     /// with any collision and which pairs collide there, or None
+    #[pyo3(signature = (transforms, pairs, *, threads = None))]
     fn check_first<'py>(
         &self,
         py: Python<'py>,
         transforms: &Bound<'py, PyDict>,
         pairs: &Bound<'py, PyList>,
+        threads: Option<isize>,
     ) -> PyResult<Option<(usize, Bound<'py, PyArray1<bool>>)>> {
-        let query = self.prepare_query(transforms, pairs)?;
+        let workers = Workers::new(threads)?;
+        let query = self.prepare_query(transforms, pairs, &workers)?;
         // find_first returns the lowest matching index, unlike find_any.
-        let first = py.detach(|| {
+        let first = py.detach(|| workers.install(query.n, || {
             query
                 .pose_hits()
                 .find_first(|&(_, hit)| hit)
                 .map(|(pose_idx, _)| pose_idx)
-        });
+        }));
 
         Ok(first.map(|pose_idx| {
             let mut poses = query.pose_scratch();
@@ -932,17 +948,21 @@ impl CollisionWorld {
     /// (4, 4) pose counts as N = 1.
     ///
     /// Returns: (N,) int64 array - per pose, the index into `pairs` of the
-    /// first colliding pair, or -1 if none collides
+    /// first colliding pair, or -1 if none collides. Always 1-D: a single
+    /// (4, 4) pose and a (1, 4, 4) batch both give shape (1,).
+    #[pyo3(signature = (transforms, pairs, *, threads = None))]
     fn check_per_pose<'py>(
         &self,
         py: Python<'py>,
         transforms: &Bound<'py, PyDict>,
         pairs: &Bound<'py, PyList>,
+        threads: Option<isize>,
     ) -> PyResult<Bound<'py, PyArray1<i64>>> {
-        let query = self.prepare_query(transforms, pairs)?;
+        let workers = Workers::new(threads)?;
+        let query = self.prepare_query(transforms, pairs, &workers)?;
         let mut first = vec![-1i64; query.n];
-        py.detach(|| {
-            first.par_iter_mut().enumerate().for_each_init(
+        py.detach(|| workers.install(query.n, || {
+            first.par_iter_mut().enumerate().with_min_len(query.min_len).for_each_init(
                 || query.pose_scratch(),
                 |poses, (pose_idx, out)| {
                     query.fill_poses(pose_idx, poses);
@@ -951,7 +971,7 @@ impl CollisionWorld {
                     }
                 },
             )
-        });
+        }));
         Ok(first.into_pyarray(py))
     }
 
@@ -1017,9 +1037,10 @@ impl CollisionWorld {
         &self,
         transforms: &Bound<'_, PyDict>,
         pairs: &Bound<'_, PyList>,
+        workers: &Workers,
     ) -> PyResult<PreparedQuery<'_>> {
         let pairs = self.resolve_pairs(&parse_pairs(pairs)?)?;
-        let (n, dynamic) = self.parse_transforms(transforms)?;
+        let (n, dynamic) = self.parse_transforms(transforms, workers)?;
 
         // Static poses are fixed, so they are composed once rather than per pose.
         let base_poses = self
@@ -1038,6 +1059,7 @@ impl CollisionWorld {
 
         Ok(PreparedQuery {
             n,
+            min_len: workers.min_len(),
             pairs,
             dynamic,
             shapes: &self.shapes,
@@ -1067,6 +1089,7 @@ impl CollisionWorld {
     fn parse_transforms(
         &self,
         transforms: &Bound<'_, PyDict>,
+        workers: &Workers,
     ) -> PyResult<(usize, DynamicTransforms)> {
         let mut dynamic = Vec::with_capacity(self.data.dynamic_group_names.len());
         let mut batch_size: Option<usize> = None;
@@ -1101,7 +1124,9 @@ impl CollisionWorld {
                 }
 
                 let slice = arr4.as_slice()?;
-                transforms.py().detach(|| batch_transforms(slice, dynamic_name))?
+                transforms.py().detach(|| {
+                    workers.install(n, || batch_transforms(slice, dynamic_name, workers.min_len()))
+                })?
             } else if let Ok(arr2) = arr_any.extract::<PyReadonlyArray2<f64>>() {
                 // (4, 4) single
                 let tf = extract_transform_4x4(&arr2)?;
@@ -1133,6 +1158,8 @@ type DynamicTransforms = Vec<(usize, Vec<[[f64; 4]; 4]>)>;
 struct PreparedQuery<'a> {
     /// Number of poses.
     n: usize,
+    /// `Workers::min_len` for the pose loop.
+    min_len: usize,
     /// `(group_a, group_b, min_distance)` as group indices, in `pairs` order.
     pairs: Vec<(usize, usize, f64)>,
     dynamic: DynamicTransforms,
@@ -1200,7 +1227,7 @@ impl PreparedQuery<'_> {
 
     /// `(pose_idx, any pair collides)` for every pose, reusing one pose buffer per job.
     fn pose_hits(&self) -> impl ParallelIterator<Item = (usize, bool)> + '_ {
-        (0..self.n).into_par_iter().map_init(
+        (0..self.n).into_par_iter().with_min_len(self.min_len).map_init(
             || self.pose_scratch(),
             |poses, pose_idx| {
                 self.fill_poses(pose_idx, poses);
@@ -1208,6 +1235,95 @@ impl PreparedQuery<'_> {
             },
         )
     }
+}
+
+// ============================================================================
+// Per-call thread cap
+// ============================================================================
+
+/// Where a query's parallel work runs, chosen by its `threads` argument.
+enum Workers {
+    /// `threads=None`: Rayon's global pool, as without the argument.
+    Global,
+    /// `threads=1`: no pool at all, everything runs in the calling thread.
+    Serial,
+    /// `threads=n` for n >= 2: a cached pool of exactly n workers.
+    Pool(Arc<ThreadPool>),
+}
+
+/// Pools for `threads >= 2`, one per size, built on first use and kept for the
+/// life of the process, because spawning the threads costs more than a small query.
+static POOLS: OnceLock<Mutex<HashMap<usize, Arc<ThreadPool>>>> = OnceLock::new();
+
+impl Workers {
+    fn new(threads: Option<isize>) -> PyResult<Self> {
+        let n = match threads {
+            None => return Ok(Workers::Global),
+            Some(t) if t < 1 => {
+                return Err(PyValueError::new_err(format!(
+                    "threads must be a positive integer or None, got {}",
+                    t
+                )))
+            }
+            Some(1) => return Ok(Workers::Serial),
+            Some(t) => t as usize,
+        };
+        // A poisoned lock only means a panic elsewhere while holding it; the map is still valid.
+        let mut pools = POOLS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(pool) = pools.get(&n) {
+            return Ok(Workers::Pool(Arc::clone(pool)));
+        }
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(n)
+            .thread_name(move |i| format!("py-parry3d-{}-{}", n, i))
+            .build()
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to start {} threads: {}", n, e)))?;
+        let pool = Arc::new(pool);
+        pools.insert(n, Arc::clone(&pool));
+        Ok(Workers::Pool(pool))
+    }
+
+    /// Minimum items per Rayon job: `usize::MAX` never splits, so a parallel
+    /// iterator called outside any pool runs entirely in the calling thread.
+    fn min_len(&self) -> usize {
+        match self {
+            Workers::Serial => usize::MAX,
+            _ => 1,
+        }
+    }
+
+    /// Run `op`, whose parallel iterators cover `len` items, on these workers.
+    ///
+    /// With at most one item Rayon does not split, so the pool hop is skipped.
+    fn install<R: Send>(&self, len: usize, op: impl FnOnce() -> R + Send) -> R {
+        match self {
+            Workers::Pool(pool) if len > 1 => pool.install(op),
+            _ => op(),
+        }
+    }
+}
+
+/// Number of distinct OS threads that run `items` jobs for a given `threads`.
+///
+/// Private test hook for the cap; it uses the same `Workers` path as the queries.
+#[pyfunction]
+#[pyo3(signature = (items, threads = None))]
+fn _probe_workers(py: Python<'_>, items: usize, threads: Option<isize>) -> PyResult<usize> {
+    let workers = Workers::new(threads)?;
+    let seen = Mutex::new(HashSet::new());
+    py.detach(|| {
+        workers.install(items, || {
+            (0..items).into_par_iter().with_min_len(workers.min_len()).for_each(|_| {
+                // Long enough that idle workers wake up and steal jobs.
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                seen.lock().unwrap().insert(std::thread::current().id());
+            })
+        })
+    });
+    Ok(seen.into_inner().unwrap().len())
 }
 
 // ============================================================================
@@ -1361,10 +1477,11 @@ fn transform<'py>(
     Ok(arr.reshape([4, 4])?)
 }
 
-/// Set the number of threads for parallel operations.
+/// Set the size of the process-wide thread pool used by parallel operations.
 ///
-/// Must be called BEFORE the first parallel operation (check/check_any/check_first).
+/// Must be called BEFORE the first parallel operation (check/check_any/check_first/check_per_pose).
 /// Returns True if successful, False if thread pool was already initialized.
+/// To cap a single call instead, pass `threads=` to that method.
 #[pyfunction]
 fn set_num_threads(n: usize) -> bool {
     rayon::ThreadPoolBuilder::new()
@@ -1373,7 +1490,7 @@ fn set_num_threads(n: usize) -> bool {
         .is_ok()
 }
 
-/// Get the number of threads for parallel operations.
+/// Get the size of the process-wide thread pool (calls with `threads=` may use fewer).
 #[pyfunction]
 fn get_num_threads() -> usize {
     rayon::current_num_threads()
@@ -1405,6 +1522,7 @@ fn py_parry3d(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(transform, m)?)?;
     m.add_function(wrap_pyfunction!(set_num_threads, m)?)?;
     m.add_function(wrap_pyfunction!(get_num_threads, m)?)?;
+    m.add_function(wrap_pyfunction!(_probe_workers, m)?)?;
 
     Ok(())
 }

@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `check(...).any(axis=1)`, without building the `(N, n_pairs)` matrix. Each
   pose stops at its first colliding pair. Same inputs and validation as
   `check`; a single `(4, 4)` pose counts as `N = 1`. (#23)
+- **Per-call thread cap.** `check`, `check_any`, `check_first` and
+  `check_per_pose` take a keyword-only `threads: int | None = None`. `None`
+  keeps the previous behaviour (the process-wide pool sized by
+  `set_num_threads`). `threads=1` runs the call serially in the calling
+  thread; `threads=n` for `n >= 2` runs both batch validation and the query
+  loop on a pool of `n` threads, still without the GIL. Pools are cached per
+  thread count for the life of the process, so their idle threads stay alive.
+  `threads < 1` raises `ValueError`. Results and error messages do not depend
+  on `threads`, apart from which colliding pose `check_any` reports.
 
 ### Changed
 
