@@ -117,7 +117,13 @@ type Shape = Box | Sphere | Capsule | Cylinder | TriMesh | ConvexHull
 # ============================================================================
 
 class CollisionObject:
-    """A shape with an optional local transform."""
+    """A shape with an optional local transform.
+
+    The collision shape (for a TriMesh, its BVH) is built once, when the
+    object is created, with the GIL released. Groups and worlds made from the
+    object share it, so build an object once and reuse it to make new worlds
+    cheaply.
+    """
 
     def __init__(
         self,

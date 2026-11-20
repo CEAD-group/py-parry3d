@@ -577,11 +577,20 @@ fn extract_transform_4x4(arr: &PyReadonlyArray2<f64>) -> PyResult<[[f64; 4]; 4]>
 // ============================================================================
 
 /// A shape with an optional local transform.
+///
+/// The parry shape (for a `TriMesh`, including its BVH) is built once, when
+/// the object is created, and shared by every group and world the object is
+/// put in. Building a world from existing objects therefore does not rebuild
+/// their shapes.
 #[pyclass(module = "py_parry3d._internal", from_py_object)]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CollisionObject {
     shape: ShapeData,
     transform: [[f64; 4]; 4],
+    /// The built parry shape and its intrinsic pose offset. Not serialized:
+    /// a deserialized object rebuilds it on first use.
+    #[serde(skip)]
+    built: Option<(SharedShape, Pose3)>,
 }
 
 #[pymethods]
@@ -602,10 +611,7 @@ impl CollisionObject {
             ]
         };
 
-        Ok(CollisionObject {
-            shape: shape_data,
-            transform: tf,
-        })
+        Ok(CollisionObject::build(py, shape_data, tf))
     }
 
     fn __repr__(&self) -> String {
@@ -614,6 +620,26 @@ impl CollisionObject {
 }
 
 impl CollisionObject {
+    /// Make an object and build its parry shape. The build (a `TriMesh`'s
+    /// BVH, a `ConvexHull`'s polyhedron) runs with the GIL released, so other
+    /// Python threads keep running meanwhile.
+    fn build(py: Python<'_>, shape: ShapeData, transform: [[f64; 4]; 4]) -> Self {
+        let built = py.detach(|| shape.to_shared_shape());
+        CollisionObject {
+            shape,
+            transform,
+            built: Some(built),
+        }
+    }
+
+    /// The parry shape and its intrinsic pose offset, built on first use if
+    /// the object was deserialized.
+    fn shared_shape(&mut self) -> (SharedShape, Pose3) {
+        self.built
+            .get_or_insert_with(|| self.shape.to_shared_shape())
+            .clone()
+    }
+
     fn to_isometry(&self) -> Pose3 {
         matrix4_to_isometry(&self.transform)
     }
@@ -668,15 +694,16 @@ impl CollisionGroup {
             } else {
                 // Try to interpret as a bare shape
                 let shape_data = extract_shape(py, &item)?;
-                collision_objects.push(CollisionObject {
-                    shape: shape_data,
-                    transform: [
+                collision_objects.push(CollisionObject::build(
+                    py,
+                    shape_data,
+                    [
                         [1.0, 0.0, 0.0, 0.0],
                         [0.0, 1.0, 0.0, 0.0],
                         [0.0, 0.0, 1.0, 0.0],
                         [0.0, 0.0, 0.0, 1.0],
                     ],
-                });
+                ));
             }
         }
 
@@ -718,19 +745,22 @@ impl CollisionGroup {
     /// A shape may also carry an intrinsic pose offset of its own (a
     /// `Cylinder` does, to reorient parry's Y-aligned cylinder to Z); it is
     /// composed onto the object's local pose in both branches.
+    ///
+    /// The objects' shapes are already built (see `CollisionObject`), so this
+    /// only shares them; only a multi-object group's `Compound` is built here.
     fn build_shape(&mut self) -> Arc<(SharedShape, Pose3)> {
         if let Some(ref cached) = self.cached_shape {
             return cached.clone();
         }
 
         let result = if self.objects.len() == 1 {
-            let (shape, shape_offset) = self.objects[0].shape.to_shared_shape();
+            let (shape, shape_offset) = self.objects[0].shared_shape();
             Arc::new((shape, self.objects[0].to_isometry() * shape_offset))
         } else {
             let shapes: Vec<(Pose3, SharedShape)> = self.objects
-                .iter()
+                .iter_mut()
                 .map(|o| {
-                    let (shape, shape_offset) = o.shape.to_shared_shape();
+                    let (shape, shape_offset) = o.shared_shape();
                     (o.to_isometry() * shape_offset, shape)
                 })
                 .collect();

@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`CollisionObject` builds its shape once.** The parry shape (a `TriMesh`'s
+  BVH, a `ConvexHull`'s polyhedron) is now built when the `CollisionObject` is
+  created, with the GIL released, instead of inside every `CollisionWorld`
+  constructor. Groups and worlds made from an existing object share its shape,
+  so rebuilding a world, for example to swap one group, no longer rebuilds the
+  BVH of every mesh in it. For a 192k-triangle mesh, a world built from an
+  existing object takes about 5 ms instead of about 115 ms, and other Python
+  threads keep running while the object is built. Bare shapes passed to
+  `CollisionGroup` are built when the group is created. A deserialized world
+  rebuilds its shapes on load, as before. Results are unchanged.
+
 ## [0.0.6] - 2026-10-30
 
 ### Changed
