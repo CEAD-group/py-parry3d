@@ -85,6 +85,89 @@ class TestCollisionObject:
         assert obj is not None
 
 
+class TestCollisionObjectReuse:
+    """A CollisionObject builds its shape once and can be shared by many worlds."""
+
+    @staticmethod
+    def _tetrahedron() -> pp.CollisionObject:
+        vertices = np.array([
+            [0, 0, 0],
+            [1, 0, 0],
+            [0, 1, 0],
+            [0, 0, 1],
+        ], dtype=np.float64)
+        faces = np.array([
+            [0, 1, 2],
+            [0, 1, 3],
+            [0, 2, 3],
+            [1, 2, 3],
+        ], dtype=np.uint32)
+        return pp.CollisionObject(pp.TriMesh(vertices, faces))
+
+    @staticmethod
+    def _sweep(n: int = 50) -> np.ndarray:
+        """Poses moving a group along x, through the tetrahedron and out."""
+        tfs = np.tile(np.eye(4), (n, 1, 1))
+        tfs[:, 0, 3] = np.linspace(-2.0, 2.0, n)
+        return tfs
+
+    def _world(self, mesh: pp.CollisionObject, *, static: bool = True) -> pp.CollisionWorld:
+        tf = np.eye(4, dtype=np.float64)
+        return pp.CollisionWorld([
+            pp.CollisionGroup("mesh", [mesh], static=static, transform=tf if static else None),
+            pp.CollisionGroup("probe", [pp.Sphere(0.1)]),
+        ])
+
+    def test_shared_object_matches_fresh_objects(self):
+        shared = self._tetrahedron()
+        transforms = {"probe": self._sweep()}
+        pairs = [("mesh", "probe", 0.0)]
+
+        expected = self._world(self._tetrahedron()).check(transforms, pairs)
+        assert expected.any() and not expected.all()
+        for _ in range(3):
+            np.testing.assert_array_equal(self._world(shared).check(transforms, pairs), expected)
+
+    def test_shared_object_in_static_and_dynamic_groups(self):
+        shared = self._tetrahedron()
+        pairs = [("mesh", "probe", 0.0)]
+        sweep = self._sweep()
+
+        static = self._world(shared).check({"probe": sweep}, pairs)
+        dynamic = self._world(shared, static=False).check({"mesh": np.tile(np.eye(4), (len(sweep), 1, 1)), "probe": sweep}, pairs)
+        np.testing.assert_array_equal(static, dynamic)
+
+    def test_multi_object_group_from_prebuilt_objects(self):
+        # A TriMesh cannot sit in a multi-object group (a parry Compound), so
+        # this uses one Box, placed twice by two objects' local transforms.
+        box = pp.Box([0.1, 0.1, 0.1])
+        offset = np.eye(4, dtype=np.float64)
+        offset[0, 3] = 5.0
+        tf = np.eye(4, dtype=np.float64)
+        probe = np.tile(np.eye(4), (3, 1, 1))
+        probe[:, 0, 3] = [0.0, 2.5, 5.0]
+        pairs = [("multi", "probe", 0.0)]
+
+        world = pp.CollisionWorld([
+            pp.CollisionGroup(
+                "multi",
+                [pp.CollisionObject(box), pp.CollisionObject(box, transform=offset)],
+                static=True,
+                transform=tf,
+            ),
+            pp.CollisionGroup("probe", [pp.Sphere(0.1)]),
+        ])
+        np.testing.assert_array_equal(world.check({"probe": probe}, pairs), [[True], [False], [True]])
+
+    def test_deserialized_world_rebuilds_shapes(self):
+        world = self._world(self._tetrahedron())
+        transforms = {"probe": self._sweep()}
+        pairs = [("mesh", "probe", 0.0)]
+
+        restored = pp.CollisionWorld.from_bytes(world.to_bytes())
+        np.testing.assert_array_equal(restored.check(transforms, pairs), world.check(transforms, pairs))
+
+
 class TestCollisionGroup:
     """Test CollisionGroup creation."""
 

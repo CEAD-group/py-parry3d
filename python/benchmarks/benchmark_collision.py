@@ -123,6 +123,51 @@ def create_mesh_world() -> pp.CollisionWorld:
     return pp.CollisionWorld(groups)
 
 
+def create_grid_mesh(n: int) -> tuple[np.ndarray, np.ndarray]:
+    """A wavy (n x n) grid surface with 2 * (n - 1)**2 triangles."""
+    xs = np.linspace(-1.0, 1.0, n)
+    x, y = np.meshgrid(xs, xs)
+    z = 0.1 * np.sin(4 * x) * np.cos(4 * y)
+    vertices = np.column_stack([x.ravel(), y.ravel(), z.ravel()]).astype(np.float64)
+
+    i, j = np.meshgrid(np.arange(n - 1), np.arange(n - 1))
+    a = (i * n + j).ravel()
+    b, c, d = a + 1, a + n, a + n + 1
+    faces = np.concatenate([np.column_stack([a, b, d]), np.column_stack([a, d, c])])
+    return vertices, faces.astype(np.uint32)
+
+
+def run_world_build_benchmark(n: int = 317) -> None:
+    """Time building a world around one large TriMesh.
+
+    The mesh's BVH is built once, when its CollisionObject is created; a world
+    built from that object shares it instead of rebuilding it.
+    """
+    vertices, faces = create_grid_mesh(n)
+    probe = pp.CollisionGroup("probe", [pp.Sphere(0.05)])
+
+    def make_object():
+        return pp.CollisionObject(pp.TriMesh(vertices, faces))
+
+    mesh = make_object()
+
+    def world_from_existing_object():
+        return pp.CollisionWorld([pp.CollisionGroup("mesh", [mesh]), probe])
+
+    def world_from_new_object():
+        return pp.CollisionWorld([pp.CollisionGroup("mesh", [make_object()]), probe])
+
+    print("\n" + "=" * 70)
+    print(f" World Construction (one TriMesh, {len(faces):,} triangles)")
+    print("=" * 70)
+    for name, func in [
+        ("CollisionObject", make_object),
+        ("world, new object", world_from_new_object),
+        ("world, same object", world_from_existing_object),
+    ]:
+        print(f"  {name:<20} {benchmark(func, warmup=1, iterations=5) * 1000:10.2f} ms")
+
+
 def generate_random_transforms(n: int, num_groups: int) -> dict:
     """Generate random transforms for benchmark."""
     transforms = {}
@@ -282,6 +327,8 @@ def main():
         )
 
     print_results(mesh_results, "Mesh World - Batch Size Scaling")
+
+    run_world_build_benchmark()
 
     # Thread scaling benchmark
     print("\n" + "=" * 70)

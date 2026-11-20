@@ -86,6 +86,8 @@ Convention: 4x4 homogeneous matrices, column vectors (`transform @ point`).
 
 A shape with an optional local transform (position within its group). Bare shapes are automatically wrapped with identity transform.
 
+The parry shape is built when the object is created: for a `TriMesh` this builds its BVH, for a `ConvexHull` its polyhedron. Groups and worlds made from the object share that shape instead of rebuilding it, so a world can be rebuilt cheaply from existing objects, for example to swap one group. The build runs with the GIL released.
+
 ### CollisionGroup
 
 Named collection of objects sharing the same transform. Can be static (fixed transform) or dynamic (transform provided at check time).
@@ -144,6 +146,9 @@ calls, and each distinct value keeps its own pool.
 
 Implementation notes:
 
+- `CollisionObject` builds its shape with the GIL released, so a large
+  `TriMesh` can be built in one thread while others keep running. The build
+  itself is serial.
 - The GIL is released for the parallel work in every case. Python-side
   parsing between groups still holds it, so each group's batch validation and
   the query loop are separate `install` calls on the capped pool.
@@ -179,7 +184,7 @@ Supports both `to_bytes()`/`from_bytes()` and pickle protocol.
 
 ### Key Optimizations
 
-1. **BVH per mesh**: Each TriMesh gets its own bounding volume hierarchy
+1. **BVH per mesh**: Each TriMesh gets its own bounding volume hierarchy, built once per `CollisionObject` and shared by every world that uses the object
 2. **Compound shapes for groups**: Groups with multiple shapes use parry3d's `Compound` shape with automatic BVH over sub-shapes
 3. **Parallel iteration**: Rayon parallel iterator over poses
 4. **No Python in hot loop**: All batch work happens in Rust
